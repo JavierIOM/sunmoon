@@ -1,5 +1,23 @@
 # Changelog
 
+## [1.1.0] - 2026-10-17
+
+First public release.
+
+### Added
+- First-run setup that asks for your location and rotator, so nothing about one shack is assumed.
+- hamlib detection across Program Files, `C:\Radio`, `C:\` and PATH, newest version first, with
+  a download link in Settings when it isn't installed.
+- Release zip from `build.ps1`, MIT licence, README rewritten for anyone downloading it.
+
+### Changed
+- No station or port baked in any more (was IO74RE and COM8). Existing `sunmoon.json` files are
+  untouched.
+- Settings window is two columns so it fits a 1080p screen, and checks your location before the
+  rotator, in the same order as the form.
+- Settings save to `%APPDATA%\SunMoon` when the program's folder is read-only.
+- "Port in use" names the usual suspects (PstRotator, HRD Rotator, OscarWatch, rotctld).
+
 ## [1.0.0] - 2026-10-17
 
 ### Added

@@ -1,8 +1,10 @@
 # Builds SunMoon.exe with PyInstaller and installs it to C:\Radio\sunmoon,
 # with Desktop and Start menu shortcuts. Keeps the sunmoon.json already there.
 #
-#   pwsh -File build.ps1              build and install
-#   pwsh -File build.ps1 -NoInstall   build only
+#   pwsh -File build.ps1              build, zip a release and install
+#   pwsh -File build.ps1 -NoInstall   build and zip only
+#
+# The release zip lands in %LOCALAPPDATA%\sunmoon-build\release.
 #
 # The build venv and PyInstaller's work files live in %LOCALAPPDATA%\sunmoon-build,
 # not in this OneDrive folder, so OneDrive isn't syncing thousands of build files.
@@ -38,6 +40,15 @@ if ($LASTEXITCODE -ne 0) { throw "PyInstaller failed" }
 
 $built = Join-Path $work "dist\SunMoon"
 Write-Host "Built $built"
+
+# release zip, named from the version in sunmoon.py, with the program in a SunMoon folder
+$version = [regex]::Match((Get-Content (Join-Path $repo "sunmoon.py") -Raw), '__version__ = "([^"]+)"').Groups[1].Value
+$release = Join-Path $work "release"
+New-Item -ItemType Directory -Force $release | Out-Null
+$zip = Join-Path $release "SunMoon-$version-win64.zip"
+if (Test-Path $zip) { Remove-Item $zip -Force }
+Compress-Archive -Path $built -DestinationPath $zip
+Write-Host "Zipped $zip"
 if ($NoInstall) { return }
 
 if (Get-Process SunMoon -ErrorAction SilentlyContinue) {

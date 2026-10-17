@@ -1,38 +1,71 @@
 # SunMoon
 
-Points the antenna at the sun or moon through hamlib's `rotctl.exe`, so you can check the
-rotator calibration against the two things in the sky whose position is known to a fraction of
-a degree. Nudge until it's dead on, mark it, and it tells you the offset and the `rotctl` flags
-that correct it.
+**Easy calibration of your rotator using the sun or moon.**
+
+SunMoon points your antenna at the sun or moon through hamlib, keeps it tracking, and lets you
+nudge it with the arrow keys until it's dead on. Mark the reading and it tells you how far out
+your rotator is, plus the `rotctl` flags that correct it.
+
+Why the sun and moon? They're the only things in the sky whose position you can know to a
+fraction of a degree, from anywhere, on any day, with no other kit. If your rotator says 180
+and the sun is at 183, your rotator is 3 degrees out.
 
 ![SunMoon after marking a reading](docs/screenshot.png)
 
-Windows. Installed at `C:\Radio\sunmoon\SunMoon.exe`, with shortcuts on the Desktop and in the
-Start menu.
+## Download
 
-## Using it
+1. Grab `SunMoon-<version>-win64.zip` from the
+   [latest release](https://github.com/JavierIOM/sunmoon/releases/latest).
+2. Unzip it anywhere and run `SunMoon.exe`. Nothing to install.
 
-**Close OscarWatch first** (or HRD Rotator, or any rotctld). They hold the rotator's port, and
-SunMoon will tell you so if one of them has it. **Disconnect** hands the port back without
-closing SunMoon.
+You'll also need:
 
-1. Wait for a clear day with the sun well above the trees. Press **Point at the sun**. It slews
-   there and keeps tracking.
-2. Check it's really on the sun. By eye, the boom's shadow shrinks to a dot. By ear, sun noise
-   peaks on the receiver. That's faint on 2 m and much easier on 70 cm and up.
-3. Nudge with the arrow keys (or the buttons) until it's dead on. Pick a bigger step if 1 degree
-   nudges don't shift it: the GS-232B seems to ignore moves of about 2 degrees or less.
+- Windows 10 or 11, 64-bit.
+- **hamlib** for Windows: the `hamlib-w64` installer from the
+  [hamlib releases](https://github.com/Hamlib/Hamlib/releases). SunMoon drives your rotator
+  through hamlib's `rotctl.exe` and finds it by itself in the usual places.
+- A rotator and controller that hamlib supports: Yaesu GS-232A/B, SPID, Easycomm and
+  [plenty more](https://github.com/Hamlib/Hamlib/wiki/Supported-Rotators), or a rotctld
+  already running.
+
+**Windows will probably warn you the first time** ("Windows protected your PC"), because the exe
+isn't code-signed. Click **More info**, then **Run anyway**. That's normal for hobby software
+off GitHub.
+
+## First run
+
+SunMoon asks for:
+
+- **Your location:** your grid locator, or latitude and longitude if you want it exact.
+- **Your rotator:** its hamlib model, the serial port (the list shows the chip behind each port,
+  FTDI or CP210x, so you don't pick your radio by mistake) and the baud rate.
+
+Close anything else that drives the rotator first (PstRotator, HRD Rotator, OscarWatch, a
+rotctld). Only one program can hold a serial port, and SunMoon will tell you if something else
+has it. **Disconnect** hands the port back without closing SunMoon.
+
+Want to try it without moving anything? Pick model **1 Simulator (hamlib dummy)**.
+
+## Calibrating
+
+1. Wait for a clear day with the sun well above the trees, and press **Point at the sun**. It
+   slews there and keeps tracking.
+2. Check it's really on the sun:
+   - **By eye:** the boom's shadow shrinks to a dot, or the elements' shadows line up on the boom.
+   - **By ear:** sun noise peaks on the receiver. Faint on 2 m, much easier on 70 cm and up.
+3. Nudge with the arrow keys until it's dead on. If small nudges don't shift it, pick a bigger
+   step: some controllers ignore moves of a degree or two.
 4. Wait for **SETTLED**, then press **Space** (or **Mark reading**).
 5. The result panel shows the offset and the flags, e.g. `-o +1.9 -O -1.9`. **Copy flags** puts
    them on the clipboard.
 
 The offset is the rotator's reading minus where the sun really is. hamlib adds `-o`/`-O` to every
-position it sends and subtracts them from every reading (checked in `src/rotator.c`), so the
-flags it gives you are the right way round for rotctl and rotctld. OscarWatch's own offset
-setting may apply it the other way round, so do one test move before trusting it there.
+position it sends and subtracts them from every reading (see `src/rotator.c`), so the flags are
+the right way round for `rotctl` and `rotctld`. Other programs' offset settings may work the
+other way round, so do one test move before trusting them.
 
-The moon works the same way. It's far too faint to hear on 2 m, so it's a by-eye check, or use a
-camera strapped to the boom.
+The moon works the same way. It's too faint to hear on most VHF setups, so it's a by-eye check,
+or strap a camera to the boom.
 
 | Key | Does |
 | --- | --- |
@@ -40,62 +73,61 @@ camera strapped to the boom.
 | Space | Mark the reading, once it says SETTLED |
 | Esc | Stop the rotator and stop tracking |
 
-Practising without moving anything: in **Settings**, pick model **1 Simulator (hamlib dummy)**.
-
 ## Settings
 
-Everything is in the **Settings** window and saved to `sunmoon.json` next to the exe. The
-defaults match this shack: Yaesu GS-232B (hamlib model 603) on COM8 at 9600 baud, IO74RE, 63 m.
+All in the **Settings** window.
 
 | Setting | What it's for |
 | --- | --- |
-| Model | hamlib rotator model. Type any number `rotctl -l` lists. For a running rotctld use model 2 and port `127.0.0.1:4533` |
-| Port | Serial port. The list shows the chip behind each one (FTDI, CP210x) so you don't pick the radio |
-| Azimuth-only | Elevation is sent as 0 and the up and down nudges go away |
-| rotctl.exe | Found automatically under `C:\Radio\hamlib*` if the saved path goes missing |
-| Latitude and longitude | Beat the grid square's centre. Leave both blank to use the grid |
-| Lowest elevation | Won't point below this. Set it above your trees and roofs |
+| Grid locator, or latitude and longitude | Where you are. Lat/lon beats the middle of the grid square |
+| Lowest elevation | It won't point below this. Set it above your trees and roofs |
 | Deadband | Only re-commands once the target has moved this far, to spare the motors |
 | Refraction | Lifts elevation for the atmosphere: half a degree at the horizon, nothing above 10 degrees |
+| Model | hamlib rotator model. Any number `rotctl -l` lists. For a running rotctld use model 2 and port `127.0.0.1:4533` |
+| Azimuth-only | Elevation is sent as 0 and the up and down nudges go away |
+| rotctl.exe | Found automatically. Browse to it if hamlib lives somewhere unusual |
+
+They're saved to `sunmoon.json` next to `SunMoon.exe`. If that folder is read-only (say you
+unzipped it into Program Files), they go to `%APPDATA%\SunMoon` instead.
 
 ## Accuracy
 
 Sun and moon positions use Paul Schlyter's method with the main lunar perturbations, plus the
 moon's parallax (up to a degree, the term that matters). Checked against PyEphem at 4,000 random
-times across 2025 to 2027, from IO74RE:
+times across 2025 to 2027:
 
-| | Mean | Worst |
+| | Mean error | Worst |
 | --- | --- | --- |
 | Sun | 0.008 deg | 0.014 deg |
 | Moon | 0.03 deg | 0.10 deg |
 
-Rise and set agree with PyEphem to within 2 seconds, and the moon's lit fraction to within 0.3%.
-Any rotator reads back far coarser than this.
+Rise and set times agree with PyEphem to within 2 seconds, and the moon's lit fraction to within
+0.3%. Any rotator reads back far coarser than this.
 
 ## Two hamlib quirks it works around
 
-- **`rotctl -` is broken in the Windows 4.7.0 build.** It reads stray NUL commands and ignores the
-  `+` prefix. SunMoon runs rotctl in plain interactive mode over a pipe instead, and waits for the
-  `Rotator command:` prompt that ends every reply.
-- **The GS-232B's move-then-read race.** hamlib sends `W183 009` plus a bare CR, and the controller
-  answers with a CR that sometimes lands after hamlib's input flush. A position read straight
-  after a move then gets one byte and fails with `Protocol error`. Measured on COM8: 9 reads in 20
-  fail straight after a move, none with a half-second wait. SunMoon waits half a second after each
-  move and retries a failed read.
+- **`rotctl -` is broken in the Windows 4.7.0 build.** It reads stray NUL commands and ignores
+  the `+` prefix. SunMoon runs rotctl in plain interactive mode over a pipe instead, and waits
+  for the `Rotator command:` prompt that ends every reply.
+- **The Yaesu GS-232B's move-then-read race.** hamlib sends `W183 009` plus a bare CR, and the
+  controller answers with a CR that sometimes lands after hamlib's input flush. A position read
+  straight after a move then gets one byte and fails with `Protocol error`. Measured: 9 reads in
+  20 fail straight after a move, none with a half-second wait. SunMoon waits half a second after
+  each move and retries a failed read.
 
-## Building
+## Building from source
 
 ```
-pwsh -File build.ps1              build, install to C:\Radio\sunmoon, make the shortcuts
-pwsh -File build.ps1 -NoInstall   build only
+pwsh -File build.ps1              build, install to C:\Radio\sunmoon, make shortcuts, zip a release
+pwsh -File build.ps1 -NoInstall   build and zip only
+pwsh -File build.ps1 -InstallDir D:\Apps\SunMoon
 ```
 
-The first build creates a venv with PyInstaller and Pillow in `%LOCALAPPDATA%\sunmoon-build`,
-outside OneDrive. The program itself is standard-library Python: `sunmoon.py` is the engine
-(ephemeris, the rotctl driver, settings), `sunmoon_gui.py` is the window, and
-`assets/make_icon.py` draws the icon.
+The first build makes a venv with PyInstaller and Pillow in `%LOCALAPPDATA%\sunmoon-build`. The
+program itself is standard-library Python 3: `sunmoon.py` is the engine (ephemeris, the rotctl
+driver, settings), `sunmoon_gui.py` is the window, and `assets/make_icon.py` draws the icon.
 
-`sunmoon.py` also works on its own from a terminal:
+`sunmoon.py` also works on its own from a terminal, using the same `sunmoon.json`:
 
 ```
 python sunmoon.py where          sun and moon az/el and rise/set, no rotator
@@ -103,3 +135,8 @@ python sunmoon.py sun            track the sun, arrow keys nudge, Space marks
 python sunmoon.py moon --once    point, wait for it to settle, report, exit
 python sunmoon.py sun --dummy    against hamlib's simulator
 ```
+
+## Licence
+
+MIT, see [LICENSE](LICENSE). hamlib is a separate project under its own licence and isn't
+included.

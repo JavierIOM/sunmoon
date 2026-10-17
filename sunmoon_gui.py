@@ -13,6 +13,7 @@ import re
 import sys
 import threading
 import time
+import webbrowser
 import tkinter as tk
 import tkinter.font as tkfont
 from datetime import datetime
@@ -95,13 +96,14 @@ def explain(err, cfg):
     """rotctl's error, turned into what to actually do about it."""
     dev = cfg.get("device") or "the port"
     if "already open" in err or "Access denied" in err:
-        return f"{dev} is in use by another program. Close OscarWatch, HRD Rotator or rotctld, then Connect."
+        return (f"{dev} is in use by another program. Close whatever else drives the rotator "
+                "(PstRotator, HRD Rotator, OscarWatch, rotctld), then Connect.")
     if "does not exist" in err:
         return f"There's no {dev} on this PC. Is the rotator's USB lead in? Pick the port in Settings."
     if "network_open" in err or "failed to connect" in err:
         return f"Nothing is listening at {dev}. Start rotctld, or pick the serial port in Settings."
     if "rotctl not found" in err:
-        return "Can't find rotctl.exe. Point Settings at your hamlib bin folder."
+        return "Can't find rotctl.exe. Install hamlib, then point Settings at its bin folder."
     if "no answer" in err or "timed out" in err.lower():
         return f"The rotator didn't answer on {dev}. Is the controller on? Check model and baud in Settings."
     return err
@@ -327,13 +329,17 @@ class App:
     def __init__(self, root):
         self.root = root
         self.notes = []
+        self.first_run = not sm.config_exists()
         try:
             self.cfg = sm.load_config()
         except (OSError, ValueError) as e:
             self.cfg = dict(sm.DEFAULTS)
             self.notes.append(("bad", f"sunmoon.json couldn't be read ({e}), using defaults"))
         self.cfg["rotctl"] = sm.find_rotctl(self.cfg["rotctl"])
-        self.station = sm.station_from_cfg(self.cfg)
+        try:
+            self.station = sm.station_from_cfg(self.cfg)
+        except ValueError:
+            self.station = None                # first run, or a config with no location in it
         self.tracker = Tracker()
         self.mark = None
         self.log = []
@@ -361,7 +367,11 @@ class App:
         self.build()
         for kind, text in self.notes:
             self.add_log(kind, text)
-        self.connect()
+        if self.first_run or self.station is None:
+            self.add_log("info", "Welcome. Tell SunMoon where you are and what drives your rotator.")
+            root.after(300, lambda: Settings(self, first_run=True))
+        else:
+            self.connect()
         self.tick()
 
     # fonts and theme
@@ -587,6 +597,9 @@ class App:
     # actions
 
     def connect(self):
+        if self.station is None:
+            self.add_log("warn", "Set your location and rotator in Settings first.")
+            return
         self.tracker.send("connect", dict(self.cfg))
 
     def toggle_connect(self):
@@ -662,6 +675,7 @@ class App:
                      or self.tracker.snapshot()["link"] != "on")
         self.cfg.update(new)
         self.station = sm.station_from_cfg(self.cfg)
+        self.first_run = False
         self.cache.clear()
         self.save()
         self.mark = None
@@ -724,20 +738,29 @@ class App:
 
         now = sm.utcnow()
         w["clock"].config(text=f"{now.astimezone():%H:%M:%S} local   {now:%H:%M} UTC")
-        w["station"].config(text=f"{self.station.label}, {self.station.alt_m:g} m")
+        if self.station:
+            w["station"].config(text=f"{self.station.label}, {self.station.alt_m:g} m")
+        else:
+            w["station"].config(text="No location yet. Open Settings to set up.")
         s = self.tracker.snapshot()
         on = s["link"] == "on"
 
         for body in ("sun", "moon"):
             b = w[body]
-            az, el = sm.az_el(body, now, self.station, cfg["refraction"])
-            up = el >= cfg["min_el"]
-            fg = t["text"] if up else t["faint"]
-            b["az"].config(text=f"{az:.1f}\u00b0", fg=fg)
-            b["el"].config(text=f"{el:.1f}\u00b0", fg=fg)
-            note = self.cached(f"note_{body}", 30, lambda body=body: sm.up_down_note(
-                body, self.station, cfg, cfg["refraction"]))
-            note = note[0].upper() + note[1:]
+            if self.station is None:
+                up = False
+                b["az"].config(text="---", fg=t["faint"])
+                b["el"].config(text="---", fg=t["faint"])
+                note = "Needs your location."
+            else:
+                az, el = sm.az_el(body, now, self.station, cfg["refraction"])
+                up = el >= cfg["min_el"]
+                fg = t["text"] if up else t["faint"]
+                b["az"].config(text=f"{az:.1f}\u00b0", fg=fg)
+                b["el"].config(text=f"{el:.1f}\u00b0", fg=fg)
+                note = self.cached(f"note_{body}", 30, lambda body=body: sm.up_down_note(
+                    body, self.station, cfg, cfg["refraction"]))
+                note = note[0].upper() + note[1:]
             if body == "moon":
                 lit, waxing = self.cached("phase", 60, lambda: sm.moon_phase(now))
                 note += f"\n{lit * 100:.0f}% lit, {sm.phase_name(lit, waxing)}"
@@ -754,6 +777,8 @@ class App:
             b["note"].config(text=note)
             if s["target"] == body:
                 b["btn"].set(text="Stop tracking", enabled=True, kind="normal")
+            elif self.station is None:
+                b["btn"].set(text="Set your location in Settings", enabled=False, kind="primary")
             elif not up:
                 b["btn"].set(text="Below the horizon" if cfg["min_el"] == 0
                              else f"Below {cfg['min_el']:g}\u00b0", enabled=False, kind="primary")
@@ -845,12 +870,14 @@ class App:
 # --- settings -----------------------------------------------------------------
 
 class Settings(tk.Toplevel):
-    def __init__(self, app):
+    """Settings, and on first run the setup: there is no station or port to assume."""
+
+    def __init__(self, app, first_run=False):
         super().__init__(app.root)
         self.app = app
         t, cfg = app.t, app.cfg
         self.withdraw()                       # build hidden, theme the title bar, then show
-        self.title("Settings")
+        self.title("Set up SunMoon" if first_run else "Settings")
         self.configure(bg=t["bg"])
         self.resizable(False, False)
         self.transient(app.root)
@@ -858,80 +885,107 @@ class Settings(tk.Toplevel):
         body = tk.Frame(self, bg=t["card"], highlightthickness=1, highlightbackground=t["border"],
                         padx=18, pady=16)
         body.pack(fill="both", expand=True, padx=14, pady=14)
-        body.columnconfigure(1, weight=1)
-        self.row = 0
         self.v = {}
+        rows = {}
 
-        def section(text):
-            pad = (0, 6) if self.row == 0 else (16, 6)
-            app.lab(body, text, "label", "muted").grid(row=self.row, column=0, columnspan=3, sticky="w", pady=pad)
-            self.row += 1
+        # two columns so it fits a 1080p screen: station and pointing left, rotator right
+        top = tk.Frame(body, bg=t["card"])
+        top.grid(row=0, column=0, columnspan=2, sticky="ew")
+        left = tk.Frame(body, bg=t["card"])
+        left.grid(row=1, column=0, sticky="nw", padx=(0, 28))
+        right = tk.Frame(body, bg=t["card"])
+        right.grid(row=1, column=1, sticky="nw")
+        for col in (left, right):
+            col.columnconfigure(1, weight=1)
 
-        def field(label, widget, hint=None):
-            app.lab(body, label).grid(row=self.row, column=0, sticky="w", padx=(0, 14), pady=3)
-            widget.grid(row=self.row, column=1, sticky="ew", pady=3)
-            self.row += 1
+        def nxt(parent):
+            rows[parent] = rows.get(parent, -1) + 1
+            return rows[parent]
+
+        def section(parent, text):
+            r = nxt(parent)
+            app.lab(parent, text, "label", "muted").grid(row=r, column=0, columnspan=2, sticky="w",
+                                                         pady=(0, 6) if r == 0 else (16, 6))
+
+        def field(parent, label, widget, hint=None):
+            r = nxt(parent)
+            app.lab(parent, label).grid(row=r, column=0, sticky="w", padx=(0, 14), pady=3)
+            widget.grid(row=r, column=1, sticky="ew", pady=3)
             if hint:
-                app.lab(body, hint, "small", "faint", wraplength=380, justify="left").grid(
-                    row=self.row, column=1, sticky="w", pady=(0, 4))
-                self.row += 1
+                app.lab(parent, hint, "small", "faint", wraplength=330, justify="left").grid(
+                    row=nxt(parent), column=1, sticky="w", pady=(0, 4))
 
-        def entry(key, value, width=30, parent=body):
+        def entry(parent, key, value, width=26):
             var = tk.StringVar(value="" if value is None else str(value))
             self.v[key] = var
             return ttk.Entry(parent, textvariable=var, width=width, font=app.f["body"])
 
-        section("ROTATOR")
+        if first_run:
+            app.lab(top, "Welcome to SunMoon", "head").pack(anchor="w")
+            app.lab(top, "Easy calibration of your rotator using the sun or moon. Tell it where you are "
+                         "and what drives your rotator. You can change any of this later in Settings.",
+                    "small", "muted", wraplength=760, justify="left").pack(anchor="w", pady=(2, 14))
+
+        section(left, "STATION")
+        field(left, "Grid locator", entry(left, "grid", cfg["grid"]),
+              "Your Maidenhead locator, e.g. IO74RE.")
+        field(left, "Latitude", entry(left, "lat", cfg.get("lat")))
+        field(left, "Longitude", entry(left, "lon", cfg.get("lon")),
+              "Optional, beats the grid square. Decimal degrees, west negative.")
+        field(left, "Height (m)", entry(left, "alt_m", cfg.get("alt_m", 0)))
+
+        section(left, "POINTING")
+        field(left, "Lowest elevation", entry(left, "min_el", cfg["min_el"]),
+              "Degrees. Set it above your trees and roofs.")
+        field(left, "Deadband", entry(left, "deadband", cfg["deadband"]),
+              "Degrees. Re-commands only once the target moves this far.")
+        self.v["refraction"] = tk.BooleanVar(value=bool(cfg.get("refraction", True)))
+        field(left, "", ttk.Checkbutton(left, text="Allow for atmospheric refraction",
+                                        variable=self.v["refraction"]))
+
+        section(right, "ROTATOR")
         models = [f"{num}  {name}" for num, name in MODELS]
         cur = next((m for m in models if m.split()[0] == str(cfg["model"])), str(cfg["model"]))
         self.v["model"] = tk.StringVar(value=cur)
-        field("Model", ttk.Combobox(body, textvariable=self.v["model"], values=models, width=30,
-                                    font=app.f["body"]),
-              "Type any hamlib model number if yours isn't listed (rotctl -l).")
+        field(right, "Model", ttk.Combobox(right, textvariable=self.v["model"], values=models, width=30,
+                                           font=app.f["body"]),
+              "Not listed? Type its hamlib number (rotctl -l).")
 
         ports = [f"{p}  ({k})" if k else p for p, k in serial_ports()]
         dev = cfg.get("device") or ""
         cur = next((p for p in ports if p.split()[0] == dev), dev)
         self.v["device"] = tk.StringVar(value=cur)
-        field("Port", ttk.Combobox(body, textvariable=self.v["device"], values=ports, width=30,
-                                   font=app.f["body"]),
-              "For rotctld pick model 2 and type host:port, e.g. 127.0.0.1:4533.")
+        field(right, "Port", ttk.Combobox(right, textvariable=self.v["device"], values=ports, width=30,
+                                          font=app.f["body"]),
+              "For rotctld use model 2 and host:port, e.g. 127.0.0.1:4533.")
 
         self.v["speed"] = tk.StringVar(value=str(cfg.get("speed") or 9600))
-        field("Baud", ttk.Combobox(body, textvariable=self.v["speed"], values=BAUDS, state="readonly",
-                                   width=30, font=app.f["body"]))
+        field(right, "Baud", ttk.Combobox(right, textvariable=self.v["speed"], values=BAUDS,
+                                          state="readonly", width=30, font=app.f["body"]))
 
         self.v["az_only"] = tk.BooleanVar(value=bool(cfg["az_only"]))
-        field("", ttk.Checkbutton(body, text="Azimuth-only rotator", variable=self.v["az_only"]))
+        field(right, "", ttk.Checkbutton(right, text="Azimuth-only rotator", variable=self.v["az_only"]))
 
-        rf = tk.Frame(body, bg=t["card"])
+        rf = tk.Frame(right, bg=t["card"])
         rf.columnconfigure(0, weight=1)
-        entry("rotctl", cfg["rotctl"], 40, rf).grid(row=0, column=0, sticky="ew")
+        entry(rf, "rotctl", cfg["rotctl"], 24).grid(row=0, column=0, sticky="ew")
         FlatButton(rf, app, "Browse", self.browse, padx=10, pady=3).grid(row=0, column=1, padx=(6, 0))
-        field("rotctl.exe", rf)
+        field(right, "rotctl.exe", rf)
+        hl = tk.Frame(right, bg=t["card"])
+        hl.grid(row=nxt(right), column=1, sticky="w", pady=(0, 4))
+        self.hamlib_note = app.lab(hl, "", "small", "faint", wraplength=330, justify="left")
+        self.hamlib_note.pack(anchor="w")
+        self.hamlib_link = app.lab(hl, sm.HAMLIB_DOWNLOAD, "small", "accent", cursor="hand2")
+        self.hamlib_link.bind("<Button-1>", lambda e: webbrowser.open(sm.HAMLIB_DOWNLOAD))
+        self.v["rotctl"].trace_add("write", lambda *a: self.hamlib_status())
+        self.hamlib_status()
 
-        section("STATION")
-        field("Grid locator", entry("grid", cfg["grid"]))
-        field("Latitude", entry("lat", cfg.get("lat")))
-        field("Longitude", entry("lon", cfg.get("lon")),
-              "Decimal degrees, west negative. Leave both blank to use the middle of the grid square.")
-        field("Height (m)", entry("alt_m", cfg.get("alt_m", 0)))
-
-        section("POINTING")
-        field("Lowest elevation", entry("min_el", cfg["min_el"]),
-              "Degrees. It won't point below this, so set it above your trees and roofs.")
-        field("Deadband", entry("deadband", cfg["deadband"]),
-              "Degrees. Only re-commands once the target has moved this far, to spare the motors.")
-        self.v["refraction"] = tk.BooleanVar(value=bool(cfg.get("refraction", True)))
-        field("", ttk.Checkbutton(body, text="Allow for atmospheric refraction", variable=self.v["refraction"]))
-
-        self.err = app.lab(body, "", "small", "bad", wraplength=400, justify="left")
-        self.err.grid(row=self.row, column=0, columnspan=3, sticky="w", pady=(10, 0))
-        self.row += 1
+        self.err = app.lab(body, "", "small", "bad", wraplength=760, justify="left")
+        self.err.grid(row=2, column=0, columnspan=2, sticky="w", pady=(12, 0))
 
         btns = tk.Frame(self, bg=t["bg"])
         btns.pack(fill="x", padx=14, pady=(0, 14))
-        FlatButton(btns, app, "Save", self.save, "primary").pack(side="right")
+        FlatButton(btns, app, "Start" if first_run else "Save", self.save, "primary").pack(side="right")
         FlatButton(btns, app, "Cancel", self.destroy).pack(side="right", padx=(0, 8))
         self.bind("<Return>", lambda e: self.save())
         self.bind("<Escape>", lambda e: self.destroy())
@@ -945,10 +999,24 @@ class Settings(tk.Toplevel):
         self.grab_set()
         self.focus_set()
 
+    def hamlib_status(self):
+        path = self.v["rotctl"].get().strip()
+        if path and os.path.isfile(path):
+            self.hamlib_note.config(text="Found. SunMoon talks to your rotator through hamlib's rotctl.",
+                                    fg=self.app.t["faint"])
+            self.hamlib_link.pack_forget()
+        else:
+            self.hamlib_note.config(text="hamlib isn't installed, or isn't where SunMoon looks. Get the "
+                                         "Windows installer (hamlib-w64) from the link below, then Browse "
+                                         "to rotctl.exe in its bin folder.", fg=self.app.t["warn"])
+            self.hamlib_link.pack(anchor="w", pady=(2, 0))
+
     def browse(self):
+        cur = self.v["rotctl"].get().strip()
+        start = os.path.dirname(cur) if cur and os.path.isdir(os.path.dirname(cur)) else "C:/Program Files"
         path = filedialog.askopenfilename(parent=self, title="Find rotctl.exe",
                                           filetypes=[("rotctl", "rotctl.exe"), ("Programs", "*.exe")],
-                                          initialdir="C:/Radio")
+                                          initialdir=start)
         if path:
             self.v["rotctl"].set(path)
 
@@ -973,6 +1041,17 @@ class Settings(tk.Toplevel):
                 raise ValueError(f"{label} should be between {lo:g} and {hi:g}.")
             return x
 
+        # same order as the form: where you are, then the rotator
+        grid = v["grid"].strip().upper()
+        lat_s, lon_s = v["lat"].strip(), v["lon"].strip()
+        if bool(lat_s) != bool(lon_s):
+            raise ValueError("Give both latitude and longitude, or leave both blank.")
+        lat = num("lat", "Latitude", -90, 90) if lat_s else None
+        lon = num("lon", "Longitude", -180, 180) if lon_s else None
+        if lat is None and not grid:
+            raise ValueError("Where are you? Give your grid locator, e.g. IO74RE.")
+        if lat is None and not sm.GRID_RE.fullmatch(grid):
+            raise ValueError("That grid locator doesn't look right. Four or six characters, e.g. IO74RE.")
         m = re.match(r"\s*(\d+)", v["model"])
         if not m:
             raise ValueError("Model needs a hamlib model number, e.g. 603.")
@@ -980,17 +1059,9 @@ class Settings(tk.Toplevel):
         device = v["device"].split()[0] if v["device"].strip() else ""
         if model != 1 and not device:
             raise ValueError("Pick the rotator's port.")
-        grid = v["grid"].strip().upper()
-        lat_s, lon_s = v["lat"].strip(), v["lon"].strip()
-        if bool(lat_s) != bool(lon_s):
-            raise ValueError("Give both latitude and longitude, or leave both blank.")
-        lat = num("lat", "Latitude", -90, 90) if lat_s else None
-        lon = num("lon", "Longitude", -180, 180) if lon_s else None
-        if lat is None and not re.fullmatch(r"[A-R]{2}\d{2}([A-X]{2})?", grid):
-            raise ValueError("That grid locator doesn't look right. Four or six characters, e.g. IO74RE.")
         rotctl = v["rotctl"].strip().replace("\\", "/")
         if not os.path.isfile(rotctl):
-            raise ValueError("Can't find rotctl.exe at that path.")
+            raise ValueError("Can't find rotctl.exe there. Install hamlib (link above), then Browse to it.")
         return {
             "model": model, "device": device or None, "speed": int(v["speed"]),
             "az_only": bool(v["az_only"]), "rotctl": rotctl, "grid": grid or self.app.cfg["grid"],

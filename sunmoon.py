@@ -16,7 +16,8 @@ Whatever the rotator reads minus where the body really is, is your offset.
     python sunmoon.py sun --once     point, wait for it to settle, report, exit
     python sunmoon.py sun --dummy    rehearse against hamlib's simulated rotator
 
-Rotator and station settings live in sunmoon.json next to the program.
+Rotator and station settings live in sunmoon.json next to the program, or in
+%APPDATA%/SunMoon when the program's folder is read-only.
 Standard library only, nothing to pip install.
 """
 
@@ -25,6 +26,7 @@ import glob
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import threading
@@ -37,23 +39,44 @@ try:
 except ImportError:
     msvcrt = None
 
-__version__ = "1.0.0"
+__version__ = "1.1.0"
 
-# Built as SunMoon.exe the settings sit next to the exe, not in PyInstaller's temp dir
+# Built as SunMoon.exe the program sits in its own folder, not PyInstaller's temp dir
 FROZEN = getattr(sys, "frozen", False)
 HERE = os.path.dirname(sys.executable if FROZEN else os.path.abspath(__file__))
-CONFIG_PATH = os.path.join(HERE, "sunmoon.json")
 
+
+def _config_path():
+    """sunmoon.json next to the program, unless that folder is read-only (unzipped
+    into Program Files, say), in which case %APPDATA%/SunMoon."""
+    local = os.path.join(HERE, "sunmoon.json")
+    if os.path.isfile(local):
+        return local
+    probe = os.path.join(HERE, ".sunmoon-write-test")
+    try:
+        with open(probe, "w"):
+            pass
+        os.remove(probe)
+        return local
+    except OSError:
+        folder = os.path.join(os.environ.get("APPDATA") or os.path.expanduser("~"), "SunMoon")
+        os.makedirs(folder, exist_ok=True)
+        return os.path.join(folder, "sunmoon.json")
+
+
+CONFIG_PATH = _config_path()
+
+# No station or port baked in: the first run asks. These only prefill the form.
 DEFAULTS = {
-    "rotctl": "C:/Radio/hamlib-w64-4.7.0/bin/rotctl.exe",
-    "model": 603,          # hamlib rotator model, rotctl -l lists them
-    "device": "COM8",      # serial port, or host:port with model 2 (rotctld)
+    "rotctl": "",          # found automatically when blank, see find_rotctl
+    "model": 603,          # hamlib rotator model, rotctl -l lists them. 603 is the Yaesu GS-232B
+    "device": "",          # serial port, or host:port with model 2 (rotctld)
     "speed": 9600,         # serial baud, ignored for network models
     "az_only": False,      # true for an azimuth-only rotator
-    "grid": "IO74RE",      # used when lat/lon are null
+    "grid": "",            # Maidenhead locator, used when lat/lon are null
     "lat": None,
     "lon": None,
-    "alt_m": 63,
+    "alt_m": 0,
     "min_el": 0.0,         # stop tracking below this (trees, houses)
     "step": 1.0,           # degrees per arrow-key nudge
     "deadband": 1.0,       # only re-command once the target moves this far
@@ -575,13 +598,29 @@ def cmd_track(body, station, cfg, rot, refraction, once, rot_label):
     return 0
 
 
-def find_rotctl(configured):
-    """The configured rotctl.exe, or failing that the newest hamlib under C:/Radio."""
+HAMLIB_DOWNLOAD = "https://github.com/Hamlib/Hamlib/releases"
+
+
+def _version_key(path):
+    return [int(n) for n in re.findall(r"\d+", os.path.basename(os.path.dirname(os.path.dirname(path))))]
+
+
+def find_rotctl(configured=""):
+    """The configured rotctl.exe if it exists, else the newest hamlib in the usual
+    places, else whatever is on PATH. Empty string when there is none."""
     if configured and os.path.isfile(configured):
         return configured
-    found = sorted(glob.glob("C:/Radio/hamlib*/bin/rotctl.exe")
-                   + glob.glob("C:/Program Files/hamlib*/bin/rotctl.exe"))
-    return found[-1].replace(os.sep, "/") if found else configured
+    found = []
+    for root in ("C:/Program Files", "C:/Program Files (x86)", "C:/Radio", "C:/", HERE):
+        found += glob.glob(os.path.join(root, "hamlib*", "bin", "rotctl.exe"))
+    if found:
+        return max(found, key=_version_key).replace(os.sep, "/")
+    on_path = shutil.which("rotctl")
+    return on_path.replace(os.sep, "/") if on_path else ""
+
+
+def config_exists():
+    return os.path.isfile(CONFIG_PATH)
 
 
 def load_config():
@@ -601,11 +640,17 @@ def save_config(cfg):
     os.replace(tmp, CONFIG_PATH)
 
 
+GRID_RE = re.compile(r"[A-R]{2}\d{2}([A-X]{2})?", re.I)
+
+
 def station_from_cfg(cfg):
+    """The station, or ValueError when no location has been set yet."""
     if cfg.get("lat") is not None and cfg.get("lon") is not None:
         lat, lon = float(cfg["lat"]), float(cfg["lon"])
         label = f"{lat:.4f}, {lon:.4f}"
     else:
+        if not GRID_RE.fullmatch((cfg.get("grid") or "").strip()):
+            raise ValueError("no location set: give your grid locator, or lat and lon")
         lat, lon = grid_to_latlon(cfg["grid"])
         label = f"{cfg['grid'].upper()} ({lat:.4f}, {lon:.4f})"
     return Station(lat, lon, float(cfg.get("alt_m") or 0), label)
@@ -637,9 +682,17 @@ def main():
     if args.dummy:
         cfg.update(model=1, device=None, speed=None)
 
-    station = station_from_cfg(cfg)
+    try:
+        station = station_from_cfg(cfg)
+    except ValueError as e:
+        print(f"sunmoon.json: {e}. Run SunMoon.exe once to set up, or edit {CONFIG_PATH}.")
+        return 2
     refraction = cfg.get("refraction", True) and not args.no_refraction
     cfg["rotctl"] = find_rotctl(cfg["rotctl"])
+    if not cfg["rotctl"]:
+        print(f"Can't find rotctl.exe. Install hamlib from {HAMLIB_DOWNLOAD}, "
+              "or set 'rotctl' in sunmoon.json.")
+        return 2
 
     if args.target == "where":
         cmd_where(station, cfg, refraction)
@@ -651,7 +704,8 @@ def main():
     except RotatorError as e:
         print(f"Rotator {rot_label}: {e}")
         if "already open" in str(e) or "Access denied" in str(e):
-            print("Something else has the port. OscarWatch, HRD Rotator and rotctld all use it: close them first.")
+            print("Something else has the port. Close whatever else drives the rotator "
+                  "(PstRotator, HRD Rotator, OscarWatch, rotctld) first.")
         return 2
     try:
         return cmd_track(args.target, station, cfg, rot, refraction, args.once, rot_label)
