@@ -1,0 +1,8 @@
+.claude/
+__pycache__/
+*.pyc
+sunmoon.json
+sunmoon.json.tmp
+build/
+dist/
+*.spec
