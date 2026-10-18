@@ -55,6 +55,23 @@ and run `python3 sunmoon_gui.py`.
 The Linux version is tested on Ubuntu 22.04 and 24.04, on Intel and ARM, against hamlib's
 simulator. Nobody has driven a real rotator with it yet, so tell us how you get on.
 
+### macOS
+
+For macOS 11 (Big Sur) and later, Apple Silicon and Intel alike. Grab
+`SunMoon-<version>-macos.dmg`, open it, and drag SunMoon onto Applications. rotctl is built
+into the app, so there's nothing else to install, Homebrew included.
+
+**macOS will stop it the first time**, because the app isn't notarised (that takes a paid Apple
+developer account). Open it once and click **Done** on the warning. Then go to **System
+Settings > Privacy & Security**, scroll down to the line about SunMoon, and click **Open
+Anyway**. On macOS 14 and earlier, right-click the app and choose **Open** instead. Either way
+it's once only.
+
+The rotator's port shows up as something like `cu.usbserial-DJ00ABCD`.
+
+The Mac version is tested on macOS 14 and 15, Apple Silicon and Intel, against hamlib's
+simulator. Same as Linux: tell us how you get on with a real rotator.
+
 ## First run
 
 SunMoon asks for:
@@ -111,11 +128,11 @@ All in the **Settings** window.
 | Refraction | Lifts elevation for the atmosphere: half a degree at the horizon, nothing above 10 degrees |
 | Model | hamlib rotator model. Any number `rotctl -l` lists. For a running rotctld use model 2 and port `127.0.0.1:4533` |
 | Azimuth-only | Elevation is sent as 0 and the up and down nudges go away |
-| rotctl | Found automatically. Windows: the one in the zip, or a newer hamlib you've installed. Linux: the distro's. Browse to pick a different one |
+| rotctl | Found automatically. Windows: the one in the zip, or a newer hamlib you've installed. Linux: the distro's. macOS: the one inside the app. Browse to pick a different one |
 
 On Windows they're saved to `sunmoon.json` next to `SunMoon.exe`, or to `%APPDATA%\SunMoon` if
 that folder is read-only (say you unzipped it into Program Files). On Linux they're in
-`~/.config/sunmoon/sunmoon.json`.
+`~/.config/sunmoon/sunmoon.json`, and on macOS in `~/Library/Application Support/SunMoon`.
 
 ## Accuracy
 
@@ -164,10 +181,22 @@ Linux, on any Debian-family box:
 sh packaging/linux/build-deb.sh   builds dist/sunmoon_<version>_all.deb
 ```
 
-The [Linux workflow](.github/workflows/linux.yml) builds the `.deb` on every push and tests it
-installed on Ubuntu 22.04, 24.04 and 24.04 ARM with `tests/smoke.py`: the rotctl driver
-against hamlib's simulator, the error messages, the command line with and without a terminal,
-and the window under Xvfb, with screenshots saved as artifacts.
+macOS, with the Xcode command line tools and [python.org's Python 3.13](https://www.python.org/downloads/macos/)
+(the universal2 installer, which comes with Tk):
+
+```
+sh packaging/macos/build-app.sh   builds dist/SunMoon-<version>-macos.dmg
+```
+
+It builds rotctl from the Hamlib source for both Apple Silicon and Intel, static and without
+the optional extras, so it needs nothing but macOS, then the app with PyInstaller around it.
+
+The [Linux](.github/workflows/linux.yml) and [macOS](.github/workflows/macos.yml) workflows
+build on every push and test what they built with `tests/smoke.py`: the `.deb` installed on
+Ubuntu 22.04, 24.04 and 24.04 ARM, and the app on macOS 14 and 15, Apple Silicon and Intel.
+That covers the rotctl driver against hamlib's simulator, the error messages, the command line
+with and without a terminal, that the program finds its own rotctl, and the window, with
+screenshots saved as artifacts.
 
 On Windows the first build makes a venv with PyInstaller and Pillow in `%LOCALAPPDATA%\sunmoon-build`, and
 downloads the official `hamlib-w64-4.7.0.zip` and `hamlib-4.7.0.tar.gz` there, checking both
@@ -190,8 +219,10 @@ python sunmoon.py sun --dummy    against hamlib's simulator
 
 SunMoon is MIT, see [LICENSE](LICENSE).
 
-The release zip also contains `rotctl.exe` and its DLLs from [Hamlib](https://github.com/Hamlib/Hamlib)
-4.7.0, unmodified. Hamlib is a separate project and isn't covered by SunMoon's licence: the
-library is LGPL and the programs are GPL, and their licence files are in the `hamlib-w64-4.7.0`
-folder. SunMoon only runs `rotctl.exe` as a separate program and talks to it over a pipe. The
-matching Hamlib source, `hamlib-4.7.0.tar.gz`, is attached to every release that ships it.
+The Windows zip also contains `rotctl.exe` and its DLLs from [Hamlib](https://github.com/Hamlib/Hamlib)
+4.7.0, unmodified, and the Mac app contains `rotctl` built from the Hamlib 4.7.0 source,
+unmodified. Hamlib is a separate project and isn't covered by SunMoon's licence: the library is
+LGPL and the programs are GPL. Its licence files are in the zip's `hamlib-w64-4.7.0` folder and
+in the app's `Contents/Resources/hamlib-licence`. SunMoon only runs rotctl as a separate program
+and talks to it over a pipe. The matching Hamlib source, `hamlib-4.7.0.tar.gz`, is attached to
+every release that ships it.
