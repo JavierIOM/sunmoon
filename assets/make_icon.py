@@ -1,5 +1,6 @@
-"""Draws assets/sunmoon.ico and sunmoon.png: an orange sun mid-eclipse behind a
-dark moon, inside a pointing reticle. Needs Pillow, which only the build uses.
+"""Draws assets/sunmoon.ico, sunmoon.png and sunmoon.icns: an orange sun
+mid-eclipse behind a dark moon, inside a pointing reticle. Needs Pillow, which
+only the Windows build uses; the Mac build takes the committed sunmoon.icns.
 
     python assets/make_icon.py
 """
@@ -38,7 +39,12 @@ def main():
     sizes = [16, 20, 24, 32, 40, 48, 64, 128, 256]
     big.resize((256, 256), Image.LANCZOS).save(
         os.path.join(HERE, "sunmoon.ico"), format="ICO", sizes=[(n, n) for n in sizes])
-    print("wrote sunmoon.ico and sunmoon.png")
+    # macOS icons sit inside a 1024 canvas with a 100 px margin, so it lines up with
+    # the rest of the Dock rather than looking a size too big
+    mac = Image.new("RGBA", (S, S), (0, 0, 0, 0))
+    mac.paste(big.resize((824, 824), Image.LANCZOS), (100, 100))
+    mac.save(os.path.join(HERE, "sunmoon.icns"), format="ICNS")
+    print("wrote sunmoon.ico, sunmoon.png and sunmoon.icns")
 
 
 if __name__ == "__main__":

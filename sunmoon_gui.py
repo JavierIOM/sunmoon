@@ -63,7 +63,11 @@ PORT_KINDS_LINUX = (("FTDI", "FTDI"), ("Silicon_Labs", "CP210x"), ("CP210", "CP2
                     ("Prolific", "Prolific"), ("Arduino", "Arduino"))
 # what else might be holding the rotator's port
 OTHER_PROGRAMS = ("PstRotator, HRD Rotator, OscarWatch, rotctld" if sm.WINDOWS
+                  else "rotctld, MacDoppler, Gpredict and the like" if sm.MAC
                   else "rotctld, Gpredict and the like")
+# macOS /dev/cu.* names, by driver: Apple's own, Silicon Labs', WCH's, USB CDC
+PORT_KINDS_MAC = (("SLAB", "CP210x"), ("wchusbserial", "CH340"), ("usbserial", "USB serial"),
+                  ("usbmodem", "USB modem"))
 
 
 def resource(*parts):
@@ -93,7 +97,18 @@ def serial_ports():
 
     Windows: COM ports from the registry, so no PowerShell round trip.
     Linux: /dev/serial/by-id, because ttyUSB0 and ttyUSB1 can swap at the next boot
-    when the radio is on USB too, and the by-id names don't, and they say which chip."""
+    when the radio is on USB too, and the by-id names don't, and they say which chip.
+    macOS: /dev/cu.*, the call-out side, which opens without waiting for carrier detect
+    the way /dev/tty.* does. The names carry the adapter's serial number, so they keep."""
+    if sm.MAC:
+        ports = []
+        for dev in glob.glob("/dev/cu.*"):
+            name = dev[len("/dev/cu."):]
+            if "Bluetooth" in name or "debug" in name.lower():
+                continue
+            kind = next((label for pat, label in PORT_KINDS_MAC if pat.lower() in name.lower()), "")
+            ports.append((dev, f"{name}  ({kind})" if kind else name))
+        return sorted(ports, key=lambda p: p[1])
     if not sm.WINDOWS:
         ports = []
         for link in glob.glob("/dev/serial/by-id/*"):
@@ -125,6 +140,8 @@ def explain(err, cfg):
     if "already open" in err or "Access denied" in err or "resource busy" in err:
         return (f"{dev} is in use by another program. Close whatever else drives the rotator "
                 f"({OTHER_PROGRAMS}), then Connect.")
+    if "Permission denied" in err and sm.MAC:
+        return f"macOS won't let SunMoon open {dev}. Unplug the rotator's USB lead, plug it back in, then Connect."
     if "Permission denied" in err:
         return (f"Linux won't let you open {dev}. Add yourself to the dialout group "
                 "(sudo usermod -aG dialout $USER), log out and back in, then Connect.")
@@ -134,11 +151,13 @@ def explain(err, cfg):
     if "network_open" in err or "failed to connect" in err:
         return f"Nothing is listening at {dev}. Start rotctld, or pick the serial port in Settings."
     if "rotctl not found" in err:
+        if sm.FROZEN and sm.MAC:
+            return "Can't find rotctl, it should be inside SunMoon.app. Download SunMoon again."
         if sm.FROZEN:
             return "Can't find rotctl.exe, it should be in SunMoon's hamlib-w64 folder. Unzip SunMoon again."
         if sm.WINDOWS:
             return "Can't find rotctl.exe. Install hamlib, then point Settings at its bin folder."
-        return f"Can't find rotctl. Install hamlib ({sm.HAMLIB_APT}), then Connect."
+        return f"Can't find rotctl. Install hamlib ({sm.HAMLIB_INSTALL}), then Connect."
     if "no answer" in err or "timed out" in err.lower():
         return f"The rotator didn't answer on {dev}. Is the controller on? Check model and baud in Settings."
     return err
@@ -380,6 +399,10 @@ class App:
         self.log = []
         self.cache = {}
         self.t = THEMES.get(self.cfg.get("theme"), THEMES["dark"])
+        if sm.MAC:
+            # Tk on macOS counts 72 points to the inch, Windows 96, so the same 10 pt came
+            # out a size smaller. This makes it the 13 px the rest of macOS uses.
+            root.tk.call("tk", "scaling", 96 / 72)
         self.f = self._fonts()
         self.scale = max(1.0, root.winfo_fpixels("1i") / 96)
         self.icon = int(52 * self.scale)
@@ -394,6 +417,8 @@ class App:
         except tk.TclError:
             pass
         root.protocol("WM_DELETE_WINDOW", self.close)
+        if sm.MAC:
+            root.createcommand("::tk::mac::Quit", self.close)    # Cmd+Q, so rotctl gets stopped
         root.bind("<Left>", lambda e: self.nudge(-1, 0))
         root.bind("<Right>", lambda e: self.nudge(1, 0))
         root.bind("<Up>", lambda e: self.nudge(0, 1))
@@ -419,10 +444,11 @@ class App:
         def pick(names, fallback):
             return next((n for n in names if n in fams), fallback)
 
-        # Windows first, then what Ubuntu, GNOME, Raspberry Pi OS and the rest ship
+        # Windows first, then what Ubuntu, GNOME, Raspberry Pi OS and the rest ship, then macOS
         mono = pick(("Cascadia Mono", "Consolas", "Ubuntu Mono", "DejaVu Sans Mono",
-                     "Liberation Mono", "Courier New"), "TkFixedFont")
-        ui = pick(("Segoe UI", "Ubuntu", "Cantarell", "Noto Sans", "DejaVu Sans"), "TkDefaultFont")
+                     "Liberation Mono", "SF Mono", "Menlo", "Courier New"), "TkFixedFont")
+        ui = pick(("Segoe UI", "Ubuntu", "Cantarell", "Noto Sans", "DejaVu Sans", "Helvetica Neue"),
+                  "TkDefaultFont")
 
         def semi(size):
             return ("Segoe UI Semibold", size) if "Segoe UI Semibold" in fams else (ui, size, "bold")
@@ -459,10 +485,19 @@ class App:
         self.root.option_add("*TCombobox*Listbox.font", self.f["body"])
 
     def dark_titlebar(self, win):
-        """Windows 10/11 immersive dark title bar, so the frame matches the theme."""
+        """Windows 10/11 immersive dark title bar, so the frame matches the theme. On
+        macOS, Tk 8.6.10 and later can set the window's appearance the same way."""
+        dark = self.cfg.get("theme", "dark") == "dark"
+        if sm.MAC:
+            try:
+                self.root.tk.call("::tk::unsupported::MacWindowStyle", "appearance", win,
+                                  "darkaqua" if dark else "aqua")
+            except tk.TclError:
+                pass
+            return
         try:
             hwnd = ctypes.windll.user32.GetParent(win.winfo_id())
-            val = ctypes.c_int(1 if self.cfg.get("theme", "dark") == "dark" else 0)
+            val = ctypes.c_int(1 if dark else 0)
             for attr in (20, 19):
                 ctypes.windll.dwmapi.DwmSetWindowAttribute(hwnd, attr, ctypes.byref(val), 4)
         except (AttributeError, OSError):
@@ -478,6 +513,8 @@ class App:
             # nudge the frame so Windows repaints the title bar now, not on next focus
             self.root.withdraw()
             self.root.deiconify()
+        elif sm.MAC:
+            self.dark_titlebar(self.root)
 
     # layout
 
@@ -1058,10 +1095,10 @@ class Settings(tk.Toplevel):
             self.hamlib_note.config(text=text, fg=self.app.t["faint"])
             self.hamlib_link.pack_forget()
         elif not sm.WINDOWS:
-            # Linux gets hamlib from the distro, so no download link, just the package
-            self.hamlib_note.config(text=f"hamlib isn't installed. {sm.HAMLIB_APT} on Debian, Ubuntu "
-                                         "or Raspberry Pi OS, or your distro's hamlib package.",
-                                    fg=self.app.t["warn"])
+            # Linux gets hamlib from the distro, the Mac app carries its own: no download link
+            text = ("Can't find rotctl. It comes inside SunMoon.app, so download SunMoon again."
+                    if sm.FROZEN else f"hamlib isn't installed: {sm.HAMLIB_INSTALL}.")
+            self.hamlib_note.config(text=text, fg=self.app.t["warn"])
             self.hamlib_link.pack_forget()
         else:
             text = ("Can't find rotctl.exe. hamlib comes in SunMoon's hamlib-w64 folder, so unzip "
@@ -1074,7 +1111,9 @@ class Settings(tk.Toplevel):
 
     def browse(self):
         cur = self.v["rotctl"].get().strip()
-        default = "C:/Program Files" if sm.WINDOWS else "/usr/bin"
+        default = ("C:/Program Files" if sm.WINDOWS else
+                   "/opt/homebrew/bin" if os.path.isdir("/opt/homebrew/bin") else
+                   "/usr/local/bin" if sm.MAC else "/usr/bin")
         start = os.path.dirname(cur) if cur and os.path.isdir(os.path.dirname(cur)) else default
         types = [("rotctl", "rotctl.exe"), ("Programs", "*.exe")] if sm.WINDOWS else [("rotctl", "rotctl*")]
         path = filedialog.askopenfilename(parent=self, title=f"Find {sm.ROTCTL}", filetypes=types,
@@ -1126,7 +1165,7 @@ class Settings(tk.Toplevel):
         if not os.path.isfile(rotctl):
             if sm.WINDOWS:
                 raise ValueError("Can't find rotctl.exe there. Install hamlib (link above), then Browse to it.")
-            raise ValueError(f"Can't find rotctl there. Install hamlib ({sm.HAMLIB_APT}).")
+            raise ValueError(f"Can't find rotctl there. Install hamlib ({sm.HAMLIB_INSTALL}).")
         return {
             "model": model, "device": device or None, "speed": int(v["speed"]),
             "az_only": bool(v["az_only"]), "rotctl": rotctl, "grid": grid or self.app.cfg["grid"],

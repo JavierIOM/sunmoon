@@ -3,7 +3,7 @@
 
 This is the engine: ephemeris, the rotctl driver, settings, and a command-line
 front end. SunMoon (sunmoon_gui.py) is the window built on top of it. Runs on
-Windows and Linux.
+Windows, Linux and macOS.
 
 The sun and moon are the only targets whose position you know to a fraction of
 a degree at any moment, which makes them the obvious check on rotator
@@ -19,7 +19,7 @@ Whatever the rotator reads minus where the body really is, is your offset.
 
 Rotator and station settings live in sunmoon.json: on Windows next to the
 program, or in %APPDATA%/SunMoon when the program's folder is read-only; on
-Linux in ~/.config/sunmoon.
+Linux in ~/.config/sunmoon; on macOS in ~/Library/Application Support/SunMoon.
 Standard library only, nothing to pip install.
 """
 
@@ -48,19 +48,27 @@ try:
 except ImportError:
     termios = None
 
-__version__ = "1.3.0"
+__version__ = "1.4.0"
 
 WINDOWS = os.name == "nt"
+MAC = sys.platform == "darwin"
 ROTCTL = "rotctl.exe" if WINDOWS else "rotctl"
-# Built as SunMoon.exe the program sits in its own folder, not PyInstaller's temp dir
+# Built as SunMoon.exe the program sits in its own folder, not PyInstaller's temp dir.
+# Built as SunMoon.app it's in Contents/MacOS, and what came with it is under Contents.
 FROZEN = getattr(sys, "frozen", False)
 HERE = os.path.dirname(sys.executable if FROZEN else os.path.abspath(__file__))
+BUNDLE = os.path.dirname(HERE) if FROZEN and MAC else HERE
 
 
 def _config_path():
     """Windows: sunmoon.json next to the program, unless that folder is read-only
     (unzipped into Program Files, say), in which case %APPDATA%/SunMoon.
-    Linux: ~/.config/sunmoon, as the .deb installs the program read-only."""
+    Linux: ~/.config/sunmoon, as the .deb installs the program read-only.
+    macOS: ~/Library/Application Support/SunMoon, where Mac apps keep theirs."""
+    if MAC:
+        folder = os.path.expanduser("~/Library/Application Support/SunMoon")
+        os.makedirs(folder, exist_ok=True)
+        return os.path.join(folder, "sunmoon.json")
     if not WINDOWS:
         folder = os.path.join(os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config"),
                               "sunmoon")
@@ -677,14 +685,16 @@ def cmd_track(body, station, cfg, rot, refraction, once, rot_label):
 
 
 HAMLIB_DOWNLOAD = "https://github.com/Hamlib/Hamlib/releases"
-HAMLIB_APT = "sudo apt install libhamlib-utils"
+# how to get hamlib where it doesn't come with SunMoon: Linux, or macOS from source
+HAMLIB_INSTALL = ("brew install hamlib, or sudo port install hamlib with MacPorts" if MAC else
+                  "sudo apt install libhamlib-utils on Debian, Ubuntu or Raspberry Pi OS, "
+                  "or your distro's hamlib package")
 
 
 def no_rotctl_hint():
     if WINDOWS:
         return f"Install hamlib from {HAMLIB_DOWNLOAD}, or set 'rotctl' in sunmoon.json."
-    return (f"Install hamlib: {HAMLIB_APT} on Debian, Ubuntu or Raspberry Pi OS, "
-            "or your distro's hamlib package.")
+    return f"Install hamlib: {HAMLIB_INSTALL}."
 
 
 def _version_key(path):
@@ -699,9 +709,18 @@ def find_rotctl(configured=""):
     so the HERE search finds it. HERE goes first because max() keeps the first of
     equals: ours wins a tie, a newer hamlib installed elsewhere wins outright.
 
-    On Linux hamlib comes from the distro (libhamlib-utils), so it's on PATH."""
+    On Linux hamlib comes from the distro (libhamlib-utils), so it's on PATH.
+
+    SunMoon.app carries its own rotctl, built from the Hamlib source. Without it,
+    Homebrew (Apple Silicon, then Intel) and MacPorts, by full path, because an app
+    started from Finder doesn't get the shell's PATH."""
     if configured and os.path.isfile(configured):
         return configured
+    if MAC:
+        for path in (os.path.join(getattr(sys, "_MEIPASS", HERE), "hamlib", "rotctl"),
+                     "/opt/homebrew/bin/rotctl", "/usr/local/bin/rotctl", "/opt/local/bin/rotctl"):
+            if os.path.isfile(path):
+                return path
     found = []
     roots = (HERE, "C:/Program Files", "C:/Program Files (x86)", "C:/Radio", "C:/") if WINDOWS else ()
     for root in roots:
@@ -717,9 +736,9 @@ def same_path(a, b):
 
 
 def is_bundled(path):
-    """True for the hamlib that came in SunMoon's own folder."""
+    """True for the hamlib that came in SunMoon's own folder, or inside SunMoon.app."""
     return bool(path) and os.path.normcase(os.path.abspath(path)).startswith(
-        os.path.normcase(os.path.abspath(HERE)) + os.sep)
+        os.path.normcase(os.path.abspath(BUNDLE)) + os.sep)
 
 
 def config_exists():

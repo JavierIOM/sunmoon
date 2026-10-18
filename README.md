@@ -165,7 +165,7 @@ sh packaging/linux/build-deb.sh   builds dist/sunmoon_<version>_all.deb
 ```
 
 The [Linux workflow](.github/workflows/linux.yml) builds the `.deb` on every push and tests it
-installed on Ubuntu 22.04, 24.04 and 24.04 ARM with `tests/linux_smoke.py`: the rotctl driver
+installed on Ubuntu 22.04, 24.04 and 24.04 ARM with `tests/smoke.py`: the rotctl driver
 against hamlib's simulator, the error messages, the command line with and without a terminal,
 and the window under Xvfb, with screenshots saved as artifacts.
 

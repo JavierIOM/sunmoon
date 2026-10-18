@@ -1,0 +1,79 @@
+# Builds SunMoon.app (universal, with rotctl built from the Hamlib source) into a .dmg,
+# then tests it on Apple Silicon (macOS 14 and 15) and Intel (macOS 15). Screenshots
+# come out as artifacts. Releases: download the dmg artifact and attach it with the rest.
+name: macOS
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  # python.org's universal2 build, which comes with Tk; Homebrew's Python doesn't
+  PYTHON_VERSION: "3.13.9"
+  PYTHON: /Library/Frameworks/Python.framework/Versions/3.13/bin/python3
+
+jobs:
+  dmg:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install python.org Python
+        run: |
+          curl -fsSL -o python.pkg "https://www.python.org/ftp/python/$PYTHON_VERSION/python-$PYTHON_VERSION-macos11.pkg"
+          pkgutil --check-signature python.pkg | grep "Developer ID Installer: Python Software Foundation"
+          sudo installer -pkg python.pkg -target /
+      - name: Build the app and the disk image
+        run: sh packaging/macos/build-app.sh dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dmg
+          path: dist/*.dmg
+
+  test:
+    needs: dmg
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-14, macos-15, macos-15-intel]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: dmg
+      - name: Install python.org Python
+        run: |
+          curl -fsSL -o python.pkg "https://www.python.org/ftp/python/$PYTHON_VERSION/python-$PYTHON_VERSION-macos11.pkg"
+          pkgutil --check-signature python.pkg | grep "Developer ID Installer: Python Software Foundation"
+          sudo installer -pkg python.pkg -target /
+      - name: Open the disk image
+        run: |
+          hdiutil attach -nobrowse -mountpoint /tmp/sunmoon SunMoon-*.dmg
+          ls -la /tmp/sunmoon
+          ditto /tmp/sunmoon/SunMoon.app "$RUNNER_TEMP/SunMoon.app"
+          hdiutil detach /tmp/sunmoon
+      - name: Check the app
+        run: |
+          app="$RUNNER_TEMP/SunMoon.app"
+          uname -m
+          sw_vers
+          codesign --verify --deep --strict --verbose=1 "$app"
+          defaults read "$app/Contents/Info.plist" CFBundleShortVersionString
+          lipo -archs "$app/Contents/MacOS/SunMoon"
+          find "$app" -name rotctl -type f | while read -r r; do
+            echo "$r"; lipo -archs "$r"; otool -L "$r"; test -x "$r"
+          done
+          find "$app" -path '*hamlib-licence*' -type f
+      - name: Smoke test
+        run: $PYTHON tests/smoke.py --mac "$RUNNER_TEMP/SunMoon.app" shots
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: shots-${{ matrix.os }}
+          path: shots/

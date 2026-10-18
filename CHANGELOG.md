@@ -1,5 +1,19 @@
 # Changelog
 
+## [1.4.0] - 2026-10-18
+
+macOS.
+
+### Added
+- SunMoon.app for macOS 11 and later, one app for Apple Silicon and Intel, in a `.dmg`. rotctl
+  is built from the Hamlib source and sits inside the app, so there's nothing else to install,
+  Homebrew included.
+- Mac touches: settings in `~/Library/Application Support/SunMoon`, `/dev/cu.*` ports, the
+  title bar follows the theme, Cmd+Q stops the rotator before quitting, text the size the rest
+  of macOS uses.
+- A GitHub workflow that builds the app and tests it on macOS 14 and 15, Apple Silicon and
+  Intel, with screenshots. One smoke test, `tests/smoke.py`, now covers Linux and the Mac.
+
 ## [1.3.0] - 2026-10-18
 
 Linux.
