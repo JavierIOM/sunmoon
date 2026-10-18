@@ -403,7 +403,7 @@ class App:
         self.scale = max(1.0, root.winfo_fpixels("1i") / 96)
         self.icon = int(52 * self.scale)
 
-        root.title(f"{APP} {sm.__version__}")
+        root.title(f"{APP} {sm.__version__} by 2D0PEY")
         try:
             if sm.WINDOWS:
                 root.iconbitmap(default=resource("assets", "sunmoon.ico"))

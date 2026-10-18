@@ -11,6 +11,7 @@ macOS.
 - Mac touches: settings in `~/Library/Application Support/SunMoon`, `/dev/cu.*` ports, the
   title bar follows the theme, Cmd+Q stops the rotator before quitting, text the size the rest
   of macOS uses.
+- "by 2D0PEY" in the title bar.
 - A GitHub workflow that builds the app and tests it on macOS 14 and 15, Apple Silicon and
   Intel, with screenshots. One smoke test, `tests/smoke.py`, now covers Linux and the Mac.
 
