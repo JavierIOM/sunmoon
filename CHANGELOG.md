@@ -14,6 +14,7 @@
   found automatically stays automatic, so moving the folder or installing a newer hamlib just
   works.
 - `build.ps1` downloads the official hamlib zip and source once and checks their SHA-256.
+- README screenshot retaken on 1.2.0.
 
 ## [1.1.0] - 2026-10-17
 
