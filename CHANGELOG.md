@@ -1,5 +1,20 @@
 # Changelog
 
+## [1.2.0] - 2026-10-18
+
+### Added
+- hamlib comes in the zip: rotctl.exe 4.7.0 and its DLLs, unmodified from the official
+  hamlib-w64 build, in a `hamlib-w64-4.7.0` folder. Nothing else to install. A newer hamlib
+  you've installed yourself still wins.
+- The Hamlib source and licence files go out with every release that ships it, as the GPL asks.
+
+### Changed
+- Settings says when it's using the hamlib that came with SunMoon.
+- The rotctl path is only saved to `sunmoon.json` when you've picked one yourself. The one
+  found automatically stays automatic, so moving the folder or installing a newer hamlib just
+  works.
+- `build.ps1` downloads the official hamlib zip and source once and checks their SHA-256.
+
 ## [1.1.0] - 2026-10-17
 
 First public release.

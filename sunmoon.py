@@ -39,7 +39,7 @@ try:
 except ImportError:
     msvcrt = None
 
-__version__ = "1.1.0"
+__version__ = "1.2.0"
 
 # Built as SunMoon.exe the program sits in its own folder, not PyInstaller's temp dir
 FROZEN = getattr(sys, "frozen", False)
@@ -607,16 +607,30 @@ def _version_key(path):
 
 def find_rotctl(configured=""):
     """The configured rotctl.exe if it exists, else the newest hamlib in the usual
-    places, else whatever is on PATH. Empty string when there is none."""
+    places, else whatever is on PATH. Empty string when there is none.
+
+    The release zip ships hamlib in a hamlib-w64-<version> folder next to SunMoon.exe,
+    so the HERE search finds it. HERE goes first because max() keeps the first of
+    equals: ours wins a tie, a newer hamlib installed elsewhere wins outright."""
     if configured and os.path.isfile(configured):
         return configured
     found = []
-    for root in ("C:/Program Files", "C:/Program Files (x86)", "C:/Radio", "C:/", HERE):
+    for root in (HERE, "C:/Program Files", "C:/Program Files (x86)", "C:/Radio", "C:/"):
         found += glob.glob(os.path.join(root, "hamlib*", "bin", "rotctl.exe"))
     if found:
         return max(found, key=_version_key).replace(os.sep, "/")
     on_path = shutil.which("rotctl")
     return on_path.replace(os.sep, "/") if on_path else ""
+
+
+def same_path(a, b):
+    return bool(a and b) and os.path.normcase(os.path.abspath(a)) == os.path.normcase(os.path.abspath(b))
+
+
+def is_bundled(path):
+    """True for the hamlib that came in SunMoon's own folder."""
+    return bool(path) and os.path.normcase(os.path.abspath(path)).startswith(
+        os.path.normcase(os.path.abspath(HERE)) + os.sep)
 
 
 def config_exists():

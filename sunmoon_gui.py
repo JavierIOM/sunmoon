@@ -103,6 +103,8 @@ def explain(err, cfg):
     if "network_open" in err or "failed to connect" in err:
         return f"Nothing is listening at {dev}. Start rotctld, or pick the serial port in Settings."
     if "rotctl not found" in err:
+        if sm.FROZEN:
+            return "Can't find rotctl.exe, it should be in SunMoon's hamlib-w64 folder. Unzip SunMoon again."
         return "Can't find rotctl.exe. Install hamlib, then point Settings at its bin folder."
     if "no answer" in err or "timed out" in err.lower():
         return f"The rotator didn't answer on {dev}. Is the controller on? Check model and baud in Settings."
@@ -664,8 +666,12 @@ class App:
             self.add_log("info", f"Copied {self.flags()}")
 
     def save(self):
+        cfg = dict(self.cfg)
+        # the rotctl found automatically stays automatic, so a newer hamlib gets picked up
+        if sm.same_path(cfg["rotctl"], sm.find_rotctl()):
+            cfg["rotctl"] = ""
         try:
-            sm.save_config(self.cfg)
+            sm.save_config(cfg)
         except OSError as e:
             self.add_log("bad", f"Couldn't save settings: {e}")
 
@@ -1002,13 +1008,17 @@ class Settings(tk.Toplevel):
     def hamlib_status(self):
         path = self.v["rotctl"].get().strip()
         if path and os.path.isfile(path):
-            self.hamlib_note.config(text="Found. SunMoon talks to your rotator through hamlib's rotctl.",
-                                    fg=self.app.t["faint"])
+            text = ("Using the hamlib that came with SunMoon." if sm.is_bundled(path)
+                    else "Found. SunMoon talks to your rotator through hamlib's rotctl.")
+            self.hamlib_note.config(text=text, fg=self.app.t["faint"])
             self.hamlib_link.pack_forget()
         else:
-            self.hamlib_note.config(text="hamlib isn't installed, or isn't where SunMoon looks. Get the "
-                                         "Windows installer (hamlib-w64) from the link below, then Browse "
-                                         "to rotctl.exe in its bin folder.", fg=self.app.t["warn"])
+            text = ("Can't find rotctl.exe. hamlib comes in SunMoon's hamlib-w64 folder, so unzip "
+                    "SunMoon again, or install hamlib-w64 from the link below and Browse to rotctl.exe "
+                    "in its bin folder." if sm.FROZEN else
+                    "hamlib isn't installed, or isn't where SunMoon looks. Get the Windows installer "
+                    "(hamlib-w64) from the link below, then Browse to rotctl.exe in its bin folder.")
+            self.hamlib_note.config(text=text, fg=self.app.t["warn"])
             self.hamlib_link.pack(anchor="w", pady=(2, 0))
 
     def browse(self):

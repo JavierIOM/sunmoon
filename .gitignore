@@ -6,3 +6,4 @@ sunmoon.json.tmp
 build/
 dist/
 *.spec
+hamlib-w64-*/

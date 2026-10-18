@@ -18,12 +18,13 @@ and the sun is at 183, your rotator is 3 degrees out.
    [latest release](https://github.com/JavierIOM/sunmoon/releases/latest).
 2. Unzip it anywhere and run `SunMoon.exe`. Nothing to install.
 
+hamlib comes in the zip. SunMoon drives your rotator through hamlib's `rotctl.exe`, and a copy of
+it (version 4.7.0) sits in the `hamlib-w64-4.7.0` folder next to `SunMoon.exe`. If you've
+installed a newer hamlib yourself, SunMoon finds that and uses it instead.
+
 You'll also need:
 
 - Windows 10 or 11, 64-bit.
-- **hamlib** for Windows: the `hamlib-w64` installer from the
-  [hamlib releases](https://github.com/Hamlib/Hamlib/releases). SunMoon drives your rotator
-  through hamlib's `rotctl.exe` and finds it by itself in the usual places.
 - A rotator and controller that hamlib supports: Yaesu GS-232A/B, SPID, Easycomm and
   [plenty more](https://github.com/Hamlib/Hamlib/wiki/Supported-Rotators), or a rotctld
   already running.
@@ -85,7 +86,7 @@ All in the **Settings** window.
 | Refraction | Lifts elevation for the atmosphere: half a degree at the horizon, nothing above 10 degrees |
 | Model | hamlib rotator model. Any number `rotctl -l` lists. For a running rotctld use model 2 and port `127.0.0.1:4533` |
 | Azimuth-only | Elevation is sent as 0 and the up and down nudges go away |
-| rotctl.exe | Found automatically. Browse to it if hamlib lives somewhere unusual |
+| rotctl.exe | Found automatically: the one in the zip, or a newer hamlib you've installed. Browse to pick a different one |
 
 They're saved to `sunmoon.json` next to `SunMoon.exe`. If that folder is read-only (say you
 unzipped it into Program Files), they go to `%APPDATA%\SunMoon` instead.
@@ -123,11 +124,15 @@ pwsh -File build.ps1 -NoInstall   build and zip only
 pwsh -File build.ps1 -InstallDir D:\Apps\SunMoon
 ```
 
-The first build makes a venv with PyInstaller and Pillow in `%LOCALAPPDATA%\sunmoon-build`. The
-program itself is standard-library Python 3: `sunmoon.py` is the engine (ephemeris, the rotctl
-driver, settings), `sunmoon_gui.py` is the window, and `assets/make_icon.py` draws the icon.
+The first build makes a venv with PyInstaller and Pillow in `%LOCALAPPDATA%\sunmoon-build`, and
+downloads the official `hamlib-w64-4.7.0.zip` and `hamlib-4.7.0.tar.gz` there, checking both
+against the SHA-256 in `build.ps1`. The program itself is standard-library Python 3: `sunmoon.py`
+is the engine (ephemeris, the rotctl driver, settings), `sunmoon_gui.py` is the window, and
+`assets/make_icon.py` draws the icon.
 
-`sunmoon.py` also works on its own from a terminal, using the same `sunmoon.json`:
+Run from source, SunMoon uses whatever hamlib you've installed, since the bundled copy only
+goes into the built program. `sunmoon.py` also works on its own from a terminal, using the same
+`sunmoon.json`:
 
 ```
 python sunmoon.py where          sun and moon az/el and rise/set, no rotator
@@ -138,5 +143,10 @@ python sunmoon.py sun --dummy    against hamlib's simulator
 
 ## Licence
 
-MIT, see [LICENSE](LICENSE). hamlib is a separate project under its own licence and isn't
-included.
+SunMoon is MIT, see [LICENSE](LICENSE).
+
+The release zip also contains `rotctl.exe` and its DLLs from [Hamlib](https://github.com/Hamlib/Hamlib)
+4.7.0, unmodified. Hamlib is a separate project and isn't covered by SunMoon's licence: the
+library is LGPL and the programs are GPL, and their licence files are in the `hamlib-w64-4.7.0`
+folder. SunMoon only runs `rotctl.exe` as a separate program and talks to it over a pipe. The
+matching Hamlib source, `hamlib-4.7.0.tar.gz`, is attached to every release that ships it.
