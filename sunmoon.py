@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
-"""sunmoon: point the antenna at the sun or moon through hamlib's rotctl.exe.
+"""sunmoon: point the antenna at the sun or moon through hamlib's rotctl.
 
 This is the engine: ephemeris, the rotctl driver, settings, and a command-line
-front end. SunMoon.exe (sunmoon_gui.py) is the window built on top of it.
+front end. SunMoon (sunmoon_gui.py) is the window built on top of it. Runs on
+Windows and Linux.
 
 The sun and moon are the only targets whose position you know to a fraction of
 a degree at any moment, which makes them the obvious check on rotator
@@ -16,8 +17,9 @@ Whatever the rotator reads minus where the body really is, is your offset.
     python sunmoon.py sun --once     point, wait for it to settle, report, exit
     python sunmoon.py sun --dummy    rehearse against hamlib's simulated rotator
 
-Rotator and station settings live in sunmoon.json next to the program, or in
-%APPDATA%/SunMoon when the program's folder is read-only.
+Rotator and station settings live in sunmoon.json: on Windows next to the
+program, or in %APPDATA%/SunMoon when the program's folder is read-only; on
+Linux in ~/.config/sunmoon.
 Standard library only, nothing to pip install.
 """
 
@@ -31,6 +33,7 @@ import subprocess
 import sys
 import threading
 import time
+from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from math import atan2, cos, degrees, radians, sin, sqrt, tan
 
@@ -38,17 +41,31 @@ try:
     import msvcrt  # Windows console keys, for nudging
 except ImportError:
     msvcrt = None
+try:
+    import select
+    import termios  # the same on Linux, a terminal in cbreak mode
+    import tty
+except ImportError:
+    termios = None
 
-__version__ = "1.2.0"
+__version__ = "1.3.0"
 
+WINDOWS = os.name == "nt"
+ROTCTL = "rotctl.exe" if WINDOWS else "rotctl"
 # Built as SunMoon.exe the program sits in its own folder, not PyInstaller's temp dir
 FROZEN = getattr(sys, "frozen", False)
 HERE = os.path.dirname(sys.executable if FROZEN else os.path.abspath(__file__))
 
 
 def _config_path():
-    """sunmoon.json next to the program, unless that folder is read-only (unzipped
-    into Program Files, say), in which case %APPDATA%/SunMoon."""
+    """Windows: sunmoon.json next to the program, unless that folder is read-only
+    (unzipped into Program Files, say), in which case %APPDATA%/SunMoon.
+    Linux: ~/.config/sunmoon, as the .deb installs the program read-only."""
+    if not WINDOWS:
+        folder = os.path.join(os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config"),
+                              "sunmoon")
+        os.makedirs(folder, exist_ok=True)
+        return os.path.join(folder, "sunmoon.json")
     local = os.path.join(HERE, "sunmoon.json")
     if os.path.isfile(local):
         return local
@@ -416,21 +433,51 @@ class Rotator:
 # --- the bit you look at ----------------------------------------------------
 
 ARROWS = {"H": "up", "P": "down", "K": "left", "M": "right"}
+# what a terminal sends after ESC, in normal and application cursor mode
+ESC_ARROWS = {"[A": "up", "[B": "down", "[C": "right", "[D": "left",
+              "OA": "up", "OB": "down", "OC": "right", "OD": "left"}
+
+
+def have_keys():
+    return bool(msvcrt) or bool(termios and sys.stdin.isatty())
+
+
+@contextmanager
+def key_mode():
+    """Keypresses without Enter on Linux, put back as it was afterwards. Ctrl+C
+    still works. Windows' msvcrt needs nothing."""
+    if msvcrt or not have_keys():
+        yield
+        return
+    fd = sys.stdin.fileno()
+    old = termios.tcgetattr(fd)
+    tty.setcbreak(fd)
+    try:
+        yield
+    finally:
+        termios.tcsetattr(fd, termios.TCSADRAIN, old)
 
 
 def read_keys():
     keys = []
-    if msvcrt is None:
-        return keys
-    try:
-        while msvcrt.kbhit():
-            ch = msvcrt.getwch()
-            if ch in ("\x00", "\xe0"):
-                keys.append(ARROWS.get(msvcrt.getwch(), ""))
+    if msvcrt:
+        try:
+            while msvcrt.kbhit():
+                ch = msvcrt.getwch()
+                if ch in ("\x00", "\xe0"):
+                    keys.append(ARROWS.get(msvcrt.getwch(), ""))
+                else:
+                    keys.append(ch.lower())
+        except OSError:                            # no console attached
+            pass
+    elif have_keys():
+        fd = sys.stdin.fileno()
+        while select.select([fd], [], [], 0)[0]:
+            ch = os.read(fd, 1).decode("latin-1")
+            if ch == "\x1b" and select.select([fd], [], [], 0.05)[0]:
+                keys.append(ESC_ARROWS.get(os.read(fd, 2).decode("latin-1"), ""))
             else:
                 keys.append(ch.lower())
-    except OSError:                                # no console attached
-        pass
     return keys
 
 
@@ -483,7 +530,7 @@ def cmd_track(body, station, cfg, rot, refraction, once, rot_label):
     print(f"Pointing at the {body} from {station.label}, rotator {rot_label}.")
     if once:
         print("Waiting for the rotator to settle. Ctrl+C to give up.")
-    elif msvcrt:
+    elif have_keys():
         print(f"Arrows nudge {step:g} deg, space marks a reading, 0 clears the nudge, q quits.")
     else:
         print("Ctrl+C quits.")
@@ -526,9 +573,9 @@ def cmd_track(body, station, cfg, rot, refraction, once, rot_label):
                 elif k in ("0", "c"):
                     nudge_az = nudge_el = 0.0
                     force, settled = True, False
-                elif k in (" ", "m", "\r") and pos and not settled:
+                elif k in (" ", "m", "\r", "\n") and pos and not settled:
                     show("still moving, mark that again once it says settled", keep=True)
-                elif k in (" ", "m", "\r") and pos:
+                elif k in (" ", "m", "\r", "\n") and pos:
                     last_mark = (now, az, el, pos)
                     show(f"mark {now:%H:%M:%S}  {body} {az:5.1f}/{el:4.1f}  "
                          f"rotator {pos[0]:5.1f}/{pos[1]:4.1f}  "
@@ -599,6 +646,14 @@ def cmd_track(body, station, cfg, rot, refraction, once, rot_label):
 
 
 HAMLIB_DOWNLOAD = "https://github.com/Hamlib/Hamlib/releases"
+HAMLIB_APT = "sudo apt install libhamlib-utils"
+
+
+def no_rotctl_hint():
+    if WINDOWS:
+        return f"Install hamlib from {HAMLIB_DOWNLOAD}, or set 'rotctl' in sunmoon.json."
+    return (f"Install hamlib: {HAMLIB_APT} on Debian, Ubuntu or Raspberry Pi OS, "
+            "or your distro's hamlib package.")
 
 
 def _version_key(path):
@@ -611,11 +666,14 @@ def find_rotctl(configured=""):
 
     The release zip ships hamlib in a hamlib-w64-<version> folder next to SunMoon.exe,
     so the HERE search finds it. HERE goes first because max() keeps the first of
-    equals: ours wins a tie, a newer hamlib installed elsewhere wins outright."""
+    equals: ours wins a tie, a newer hamlib installed elsewhere wins outright.
+
+    On Linux hamlib comes from the distro (libhamlib-utils), so it's on PATH."""
     if configured and os.path.isfile(configured):
         return configured
     found = []
-    for root in (HERE, "C:/Program Files", "C:/Program Files (x86)", "C:/Radio", "C:/"):
+    roots = (HERE, "C:/Program Files", "C:/Program Files (x86)", "C:/Radio", "C:/") if WINDOWS else ()
+    for root in roots:
         found += glob.glob(os.path.join(root, "hamlib*", "bin", "rotctl.exe"))
     if found:
         return max(found, key=_version_key).replace(os.sep, "/")
@@ -699,13 +757,12 @@ def main():
     try:
         station = station_from_cfg(cfg)
     except ValueError as e:
-        print(f"sunmoon.json: {e}. Run SunMoon.exe once to set up, or edit {CONFIG_PATH}.")
+        print(f"sunmoon.json: {e}. Run SunMoon once to set up, or edit {CONFIG_PATH}.")
         return 2
     refraction = cfg.get("refraction", True) and not args.no_refraction
     cfg["rotctl"] = find_rotctl(cfg["rotctl"])
     if not cfg["rotctl"]:
-        print(f"Can't find rotctl.exe. Install hamlib from {HAMLIB_DOWNLOAD}, "
-              "or set 'rotctl' in sunmoon.json.")
+        print(f"Can't find {ROTCTL}. {no_rotctl_hint()}")
         return 2
 
     if args.target == "where":
@@ -717,12 +774,16 @@ def main():
         rot = Rotator(cfg["rotctl"], cfg["model"], cfg.get("device"), cfg.get("speed"))
     except RotatorError as e:
         print(f"Rotator {rot_label}: {e}")
-        if "already open" in str(e) or "Access denied" in str(e):
+        if any(s in str(e) for s in ("already open", "Access denied", "resource busy")):
             print("Something else has the port. Close whatever else drives the rotator "
-                  "(PstRotator, HRD Rotator, OscarWatch, rotctld) first.")
+                  "(PstRotator, HRD Rotator, OscarWatch, rotctld, Gpredict) first.")
+        elif "Permission denied" in str(e):
+            print("Add yourself to the dialout group: sudo usermod -aG dialout $USER, "
+                  "then log out and back in.")
         return 2
     try:
-        return cmd_track(args.target, station, cfg, rot, refraction, args.once, rot_label)
+        with key_mode():
+            return cmd_track(args.target, station, cfg, rot, refraction, args.once, rot_label)
     except RotatorError as e:
         print(f"\nRotator {rot_label}: {e}")
         return 2

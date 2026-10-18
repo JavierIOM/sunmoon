@@ -1,0 +1,4 @@
+# shell scripts and Linux packaging files have to stay LF, whatever the checkout
+*.sh text eol=lf
+packaging/linux/* text eol=lf
+*.yml text eol=lf

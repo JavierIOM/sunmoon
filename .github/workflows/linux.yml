@@ -1,0 +1,53 @@
+# Builds the Linux .deb and tests it, installed, on Ubuntu 22.04 and 24.04, x86 and
+# ARM (the ARM run stands in for a Raspberry Pi). Screenshots of the window come out
+# as artifacts. Releases: download the deb artifact and attach it with the zip.
+name: Linux
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  deb:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build the .deb
+        run: sh packaging/linux/build-deb.sh dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: deb
+          path: dist/*.deb
+
+  test:
+    needs: deb
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, ubuntu-24.04, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: deb
+      - name: Install it, which pulls in hamlib and Tk
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q ./sunmoon_*.deb xvfb xauth imagemagick desktop-file-utils
+          dpkg -s sunmoon libhamlib-utils | grep -E '^(Package|Version):'
+      - name: Check the menu entry
+        run: desktop-file-validate /usr/share/applications/sunmoon.desktop
+      - name: Smoke test
+        run: xvfb-run -a -s "-screen 0 1280x1000x24" /usr/bin/python3 tests/linux_smoke.py shots
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: shots-${{ matrix.os }}
+          path: shots/

@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=SunMoon
+GenericName=Rotator calibration
+Comment=Easy calibration of your rotator using the sun or moon
+Exec=sunmoon
+Icon=sunmoon
+Terminal=false
+Categories=Network;HamRadio;
+Keywords=rotator;antenna;hamlib;rotctl;sun;moon;calibration;
+StartupWMClass=Sunmoon

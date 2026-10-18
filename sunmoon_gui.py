@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
-"""SunMoon: the window. Points the antenna at the sun or moon through rotctl.exe
-so you can check the rotator calibration, then tells you the offset.
+"""SunMoon: the window. Points the antenna at the sun or moon through hamlib's
+rotctl so you can check the rotator calibration, then tells you the offset.
 
 The sums and the rotctl driver live in sunmoon.py. This file is only the face,
 plus a worker thread that owns the rotator so a slow controller never freezes it.
 """
 
 import ctypes
+import glob
 import os
 import queue
 import re
@@ -56,6 +57,13 @@ BAUDS = ["1200", "2400", "4800", "9600", "19200", "38400", "57600", "115200"]
 STEPS = (0.5, 1.0, 2.0, 5.0)
 PORT_KINDS = (("VCP", "FTDI"), ("Silabser", "CP210x"), ("CH34", "CH340"),
               ("Prolific", "Prolific"), ("USBSER", "USB serial"), ("Serial", "built-in"))
+# the same, from the names in /dev/serial/by-id
+PORT_KINDS_LINUX = (("FTDI", "FTDI"), ("Silicon_Labs", "CP210x"), ("CP210", "CP210x"),
+                    ("1a86", "CH340"), ("QinHeng", "CH340"), ("CH34", "CH340"),
+                    ("Prolific", "Prolific"), ("Arduino", "Arduino"))
+# what else might be holding the rotator's port
+OTHER_PROGRAMS = ("PstRotator, HRD Rotator, OscarWatch, rotctld" if sm.WINDOWS
+                  else "rotctld, Gpredict and the like")
 
 
 def resource(*parts):
@@ -67,14 +75,33 @@ def model_name(model):
     return next((name for num, name in MODELS if num == model), f"hamlib model {model}")
 
 
+def short_port(dev):
+    """ttyUSB0 for a /dev/serial/by-id link, rather than 60 characters of FTDI serial number."""
+    if dev and dev.startswith("/dev/serial/by-id/") and os.path.exists(dev):
+        return os.path.basename(os.path.realpath(dev))
+    return dev
+
+
 def describe(cfg):
     if cfg["model"] == 1:
         return "simulator, nothing moves"
-    return f"{model_name(cfg['model'])} on {cfg.get('device') or 'no port'}"
+    return f"{model_name(cfg['model'])} on {short_port(cfg.get('device')) or 'no port'}"
 
 
 def serial_ports():
-    """[(COM8, FTDI), ...] from the registry, so no PowerShell round trip."""
+    """[(device, label), ...] for the Port list.
+
+    Windows: COM ports from the registry, so no PowerShell round trip.
+    Linux: /dev/serial/by-id, because ttyUSB0 and ttyUSB1 can swap at the next boot
+    when the radio is on USB too, and the by-id names don't, and they say which chip."""
+    if not sm.WINDOWS:
+        ports = []
+        for link in glob.glob("/dev/serial/by-id/*"):
+            name = os.path.basename(link)
+            kind = next((label for pat, label in PORT_KINDS_LINUX if pat.lower() in name.lower()),
+                        "USB serial")
+            ports.append((link, f"{short_port(link)}  ({kind})"))
+        return sorted(ports, key=lambda p: p[1])
     try:
         import winreg
         key = winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, r"HARDWARE\DEVICEMAP\SERIALCOMM")
@@ -88,24 +115,30 @@ def serial_ports():
             break
         i += 1
         kind = next((label for pat, label in PORT_KINDS if pat.lower() in dev.lower()), "")
-        ports.append((port, kind))
+        ports.append((port, f"{port}  ({kind})" if kind else port))
     return sorted(ports, key=lambda p: int(re.sub(r"\D", "", p[0]) or 0))
 
 
 def explain(err, cfg):
     """rotctl's error, turned into what to actually do about it."""
-    dev = cfg.get("device") or "the port"
-    if "already open" in err or "Access denied" in err:
+    dev = short_port(cfg.get("device")) or "the port"
+    if "already open" in err or "Access denied" in err or "resource busy" in err:
         return (f"{dev} is in use by another program. Close whatever else drives the rotator "
-                "(PstRotator, HRD Rotator, OscarWatch, rotctld), then Connect.")
-    if "does not exist" in err:
-        return f"There's no {dev} on this PC. Is the rotator's USB lead in? Pick the port in Settings."
+                f"({OTHER_PROGRAMS}), then Connect.")
+    if "Permission denied" in err:
+        return (f"Linux won't let you open {dev}. Add yourself to the dialout group "
+                "(sudo usermod -aG dialout $USER), log out and back in, then Connect.")
+    if "does not exist" in err or "No such file" in err:
+        return (f"There's no {dev} on this computer. Is the rotator's USB lead in? "
+                "Pick the port in Settings.")
     if "network_open" in err or "failed to connect" in err:
         return f"Nothing is listening at {dev}. Start rotctld, or pick the serial port in Settings."
     if "rotctl not found" in err:
         if sm.FROZEN:
             return "Can't find rotctl.exe, it should be in SunMoon's hamlib-w64 folder. Unzip SunMoon again."
-        return "Can't find rotctl.exe. Install hamlib, then point Settings at its bin folder."
+        if sm.WINDOWS:
+            return "Can't find rotctl.exe. Install hamlib, then point Settings at its bin folder."
+        return f"Can't find rotctl. Install hamlib ({sm.HAMLIB_APT}), then Connect."
     if "no answer" in err or "timed out" in err.lower():
         return f"The rotator didn't answer on {dev}. Is the controller on? Check model and baud in Settings."
     return err
@@ -352,12 +385,14 @@ class App:
         self.icon = int(52 * self.scale)
 
         root.title(f"{APP} {sm.__version__}")
-        ico = resource("assets", "sunmoon.ico")
-        if os.path.isfile(ico):
-            try:
-                root.iconbitmap(default=ico)
-            except tk.TclError:
-                pass
+        try:
+            if sm.WINDOWS:
+                root.iconbitmap(default=resource("assets", "sunmoon.ico"))
+            else:
+                self.icon_img = tk.PhotoImage(file=resource("assets", "sunmoon.png"))
+                root.iconphoto(True, self.icon_img)
+        except tk.TclError:
+            pass
         root.protocol("WM_DELETE_WINDOW", self.close)
         root.bind("<Left>", lambda e: self.nudge(-1, 0))
         root.bind("<Right>", lambda e: self.nudge(1, 0))
@@ -380,12 +415,21 @@ class App:
 
     def _fonts(self):
         fams = set(tkfont.families(self.root))
-        mono = next((m for m in ("Cascadia Mono", "Consolas", "Courier New") if m in fams), "TkFixedFont")
-        ui = "Segoe UI" if "Segoe UI" in fams else "TkDefaultFont"
-        semi = "Segoe UI Semibold" if "Segoe UI Semibold" in fams else ui
+
+        def pick(names, fallback):
+            return next((n for n in names if n in fams), fallback)
+
+        # Windows first, then what Ubuntu, GNOME, Raspberry Pi OS and the rest ship
+        mono = pick(("Cascadia Mono", "Consolas", "Ubuntu Mono", "DejaVu Sans Mono",
+                     "Liberation Mono", "Courier New"), "TkFixedFont")
+        ui = pick(("Segoe UI", "Ubuntu", "Cantarell", "Noto Sans", "DejaVu Sans"), "TkDefaultFont")
+
+        def semi(size):
+            return ("Segoe UI Semibold", size) if "Segoe UI Semibold" in fams else (ui, size, "bold")
+
         return {
-            "body": (ui, 10), "small": (ui, 9), "button": (semi, 10), "head": (semi, 10),
-            "label": (semi, 8), "title": (semi, 15), "big": (mono, 22), "num": (mono, 12),
+            "body": (ui, 10), "small": (ui, 9), "button": semi(10), "head": semi(10),
+            "label": semi(8), "title": semi(15), "big": (mono, 22), "num": (mono, 12),
             "mono": (mono, 9), "arrow": (ui, 12),
         }
 
@@ -429,10 +473,11 @@ class App:
         self.t = THEMES[self.cfg["theme"]]
         self.save()
         self.build()
-        self.dark_titlebar(self.root)
-        # nudge the frame so Windows repaints the title bar now, not on next focus
-        self.root.withdraw()
-        self.root.deiconify()
+        if sm.WINDOWS:
+            self.dark_titlebar(self.root)
+            # nudge the frame so Windows repaints the title bar now, not on next focus
+            self.root.withdraw()
+            self.root.deiconify()
 
     # layout
 
@@ -957,12 +1002,12 @@ class Settings(tk.Toplevel):
                                            font=app.f["body"]),
               "Not listed? Type its hamlib number (rotctl -l).")
 
-        ports = [f"{p}  ({k})" if k else p for p, k in serial_ports()]
+        self.ports = {label: dev for dev, label in serial_ports()}
         dev = cfg.get("device") or ""
-        cur = next((p for p in ports if p.split()[0] == dev), dev)
+        cur = next((label for label, d in self.ports.items() if d == dev), dev)
         self.v["device"] = tk.StringVar(value=cur)
-        field(right, "Port", ttk.Combobox(right, textvariable=self.v["device"], values=ports, width=30,
-                                          font=app.f["body"]),
+        field(right, "Port", ttk.Combobox(right, textvariable=self.v["device"], values=list(self.ports),
+                                          width=30, font=app.f["body"]),
               "For rotctld use model 2 and host:port, e.g. 127.0.0.1:4533.")
 
         self.v["speed"] = tk.StringVar(value=str(cfg.get("speed") or 9600))
@@ -976,7 +1021,7 @@ class Settings(tk.Toplevel):
         rf.columnconfigure(0, weight=1)
         entry(rf, "rotctl", cfg["rotctl"], 24).grid(row=0, column=0, sticky="ew")
         FlatButton(rf, app, "Browse", self.browse, padx=10, pady=3).grid(row=0, column=1, padx=(6, 0))
-        field(right, "rotctl.exe", rf)
+        field(right, sm.ROTCTL, rf)
         hl = tk.Frame(right, bg=t["card"])
         hl.grid(row=nxt(right), column=1, sticky="w", pady=(0, 4))
         self.hamlib_note = app.lab(hl, "", "small", "faint", wraplength=330, justify="left")
@@ -1012,6 +1057,12 @@ class Settings(tk.Toplevel):
                     else "Found. SunMoon talks to your rotator through hamlib's rotctl.")
             self.hamlib_note.config(text=text, fg=self.app.t["faint"])
             self.hamlib_link.pack_forget()
+        elif not sm.WINDOWS:
+            # Linux gets hamlib from the distro, so no download link, just the package
+            self.hamlib_note.config(text=f"hamlib isn't installed. {sm.HAMLIB_APT} on Debian, Ubuntu "
+                                         "or Raspberry Pi OS, or your distro's hamlib package.",
+                                    fg=self.app.t["warn"])
+            self.hamlib_link.pack_forget()
         else:
             text = ("Can't find rotctl.exe. hamlib comes in SunMoon's hamlib-w64 folder, so unzip "
                     "SunMoon again, or install hamlib-w64 from the link below and Browse to rotctl.exe "
@@ -1023,9 +1074,10 @@ class Settings(tk.Toplevel):
 
     def browse(self):
         cur = self.v["rotctl"].get().strip()
-        start = os.path.dirname(cur) if cur and os.path.isdir(os.path.dirname(cur)) else "C:/Program Files"
-        path = filedialog.askopenfilename(parent=self, title="Find rotctl.exe",
-                                          filetypes=[("rotctl", "rotctl.exe"), ("Programs", "*.exe")],
+        default = "C:/Program Files" if sm.WINDOWS else "/usr/bin"
+        start = os.path.dirname(cur) if cur and os.path.isdir(os.path.dirname(cur)) else default
+        types = [("rotctl", "rotctl.exe"), ("Programs", "*.exe")] if sm.WINDOWS else [("rotctl", "rotctl*")]
+        path = filedialog.askopenfilename(parent=self, title=f"Find {sm.ROTCTL}", filetypes=types,
                                           initialdir=start)
         if path:
             self.v["rotctl"].set(path)
@@ -1066,12 +1118,15 @@ class Settings(tk.Toplevel):
         if not m:
             raise ValueError("Model needs a hamlib model number, e.g. 603.")
         model = int(m[1])
-        device = v["device"].split()[0] if v["device"].strip() else ""
+        port = v["device"].strip()
+        device = self.ports.get(port) or (port.split()[0] if port else "")
         if model != 1 and not device:
             raise ValueError("Pick the rotator's port.")
         rotctl = v["rotctl"].strip().replace("\\", "/")
         if not os.path.isfile(rotctl):
-            raise ValueError("Can't find rotctl.exe there. Install hamlib (link above), then Browse to it.")
+            if sm.WINDOWS:
+                raise ValueError("Can't find rotctl.exe there. Install hamlib (link above), then Browse to it.")
+            raise ValueError(f"Can't find rotctl there. Install hamlib ({sm.HAMLIB_APT}).")
         return {
             "model": model, "device": device or None, "speed": int(v["speed"]),
             "az_only": bool(v["az_only"]), "rotctl": rotctl, "grid": grid or self.app.cfg["grid"],
@@ -1086,7 +1141,7 @@ def main():
         ctypes.windll.shcore.SetProcessDpiAwareness(1)   # crisp text on scaled displays
     except (AttributeError, OSError):
         pass
-    root = tk.Tk()
+    root = tk.Tk(className="sunmoon")       # WM_CLASS Sunmoon, matching sunmoon.desktop on Linux
     root.withdraw()
     app = App(root)
     root.update_idletasks()

@@ -1,0 +1,8 @@
+#!/bin/sh
+# SunMoon. No arguments opens the window; anything else goes to the command-line
+# version: sunmoon where, sunmoon sun, sunmoon moon --once, sunmoon sun --dummy.
+# The distro's own Python, because that's the one python3-tk is installed for.
+if [ $# -eq 0 ]; then
+    exec /usr/bin/python3 /usr/share/sunmoon/sunmoon_gui.py
+fi
+exec /usr/bin/python3 /usr/share/sunmoon/sunmoon.py "$@"

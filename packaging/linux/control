@@ -1,0 +1,14 @@
+Package: sunmoon
+Version: @VERSION@
+Section: hamradio
+Priority: optional
+Architecture: all
+Depends: python3 (>= 3.8), python3-tk, libhamlib-utils
+Installed-Size: @SIZE@
+Maintainer: JavierIOM <168463555+JavierIOM@users.noreply.github.com>
+Homepage: https://github.com/JavierIOM/sunmoon
+Description: easy calibration of your rotator using the sun or moon
+ SunMoon points your antenna at the sun or moon through hamlib's rotctl, keeps
+ it tracking, and lets you nudge it with the arrow keys until it's dead on.
+ Mark the reading and it tells you how far out your rotator is, plus the
+ rotctl -o/-O flags that correct it.

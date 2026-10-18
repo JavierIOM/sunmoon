@@ -1,5 +1,23 @@
 # Changelog
 
+## [1.3.0] - 2026-10-18
+
+Linux.
+
+### Added
+- A `.deb` for Debian, Ubuntu, Mint and Raspberry Pi OS, x86 and ARM alike. apt installs hamlib
+  and Tk along with it. `sunmoon` opens the window; `sunmoon where`, `sunmoon sun` and the rest
+  are the command line.
+- Linux ports are listed by their `/dev/serial/by-id` names, which stay put across reboots where
+  `ttyUSB0` and `ttyUSB1` can swap, with the chip behind each.
+- Plain-English Linux errors, including the dialout group one.
+- Arrow keys in the command-line version on Linux too.
+- A GitHub workflow that builds the `.deb` and tests it installed on Ubuntu 22.04 and 24.04, x86
+  and ARM, with screenshots of the window.
+
+### Changed
+- On Linux, settings live in `~/.config/sunmoon`. Windows is unchanged.
+
 ## [1.2.0] - 2026-10-18
 
 ### Added
