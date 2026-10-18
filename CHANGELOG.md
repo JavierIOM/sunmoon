@@ -17,6 +17,7 @@ Linux.
 
 ### Changed
 - On Linux, settings live in `~/.config/sunmoon`. Windows is unchanged.
+- README screenshot retaken on 1.3.0, and a Linux section added.
 
 ### Fixed
 - Rotators that take azimuth as -180 to 180 (hamlib 4.3's simulator, or any rotator set up
