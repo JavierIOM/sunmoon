@@ -167,6 +167,9 @@ def step():
 root.after(1000, step)
 root.mainloop()
 check(result.get("marked") and app.mark is not None, "window pointed, settled and marked")
+if app.mark:
+    print("      flags:", app.flags())
+    check("-0.0" not in app.flags(), "no -0.0 in the flags")
 check(result.get("done"), "light theme drawn")
 for line in app.log:
     print("     ", *line)

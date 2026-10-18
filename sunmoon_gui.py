@@ -690,7 +690,7 @@ class App:
         az, el = sm.az_el(body, sm.utcnow(), self.station, self.cfg["refraction"])
         raz, rel = s["pos"]
         self.mark = {"body": body, "az": az, "el": el, "raz": raz, "rel": rel,
-                     "off_az": sm.angdiff(raz, az), "off_el": rel - el,
+                     "off_az": sm.tidy(sm.angdiff(raz, az)), "off_el": sm.tidy(rel - el),
                      "at": datetime.now().strftime("%H:%M:%S")}
         self.add_log("good", f"Marked: rotator {raz:.1f}/{rel:.1f}, {body} {az:.1f}/{el:.1f}, "
                              f"offset {self.mark['off_az']:+.1f}/{self.mark['off_el']:+.1f}")
@@ -859,9 +859,9 @@ class App:
         tracking = s["target"] if on else None
         if tracking and pos:
             baz, bel = sm.az_el(tracking, now, self.station, cfg["refraction"])
-            off = f"{sm.angdiff(pos[0], baz):+.1f}\u00b0"
+            off = f"{sm.tidy(sm.angdiff(pos[0], baz)):+.1f}\u00b0"
             if not cfg["az_only"]:
-                off += f" / {pos[1] - bel:+.1f}\u00b0"
+                off += f" / {sm.tidy(pos[1] - bel):+.1f}\u00b0"
             # mid-slew the offset is only "how far it has to go", so keep it quiet until settled
             w["off"].config(text=off, fg=t["text"] if s["settled"] else t["faint"])
         else:

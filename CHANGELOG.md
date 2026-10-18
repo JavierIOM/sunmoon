@@ -22,6 +22,9 @@ Linux.
 - Rotators that take azimuth as -180 to 180 (hamlib 4.3's simulator, or any rotator set up
   that way) refused anything past 180 with "range problem". SunMoon now sends the same
   direction a turn the other way, so 182 goes as -178.
+- An offset a hair below zero showed as `-0.0`, flags included. Now `+0.0`.
+- hamlib 4.3 says only `serial_open return(-6)` for a missing port and a permission problem
+  alike, so SunMoon checks `/dev` ports itself first and says which.
 
 ## [1.2.0] - 2026-10-18
 

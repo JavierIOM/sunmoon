@@ -125,6 +125,11 @@ def angdiff(a, b):
     return (a - b + 180.0) % 360.0 - 180.0
 
 
+def tidy(x):
+    """Rounded to 0.1, and never -0.0: a reading 0.04 low is +0.0, not -0.0."""
+    return round(x, 1) + 0.0
+
+
 def julian_day(t):
     return t.timestamp() / 86400.0 + 2440587.5
 
@@ -605,8 +610,8 @@ def cmd_track(body, station, cfg, rot, refraction, once, rot_label):
                     last_mark = (now, az, el, pos)
                     show(f"mark {now:%H:%M:%S}  {body} {az:5.1f}/{el:4.1f}  "
                          f"rotator {pos[0]:5.1f}/{pos[1]:4.1f}  "
-                         f"offset {angdiff(pos[0], az):+.1f}"
-                         + ("" if az_only else f"/{pos[1] - el:+.1f}"), keep=True)
+                         f"offset {tidy(angdiff(pos[0], az)):+.1f}"
+                         + ("" if az_only else f"/{tidy(pos[1] - el):+.1f}"), keep=True)
 
             cmd_az = rev(az + nudge_az)
             cmd_el = 0.0 if az_only else min(max(el + nudge_el, 0.0), 90.0)
@@ -627,8 +632,8 @@ def cmd_track(body, station, cfg, rot, refraction, once, rot_label):
             if pos:
                 line = (f"{now:%H:%M:%S} UTC  {body} {az:5.1f}/{el:4.1f}  "
                         f"rotator {pos[0]:5.1f}/{pos[1]:4.1f}  "
-                        f"offset {angdiff(pos[0], az):+5.1f}"
-                        + ("" if az_only else f"/{pos[1] - el:+4.1f}"))
+                        f"offset {tidy(angdiff(pos[0], az)):+5.1f}"
+                        + ("" if az_only else f"/{tidy(pos[1] - el):+4.1f}"))
                 if nudge_az or nudge_el:
                     line += f"  nudge {nudge_az:+.1f}" + ("" if az_only else f"/{nudge_el:+.1f}")
                 line += "  settled" if settled else "  moving "
@@ -652,8 +657,8 @@ def cmd_track(body, station, cfg, rot, refraction, once, rot_label):
 
     if last_mark:
         _, az, el, pos = last_mark
-        off_az = angdiff(pos[0], az)
-        off_el = pos[1] - el
+        off_az = tidy(angdiff(pos[0], az))
+        off_el = tidy(pos[1] - el)
         print()
         print(f"Rotator read {pos[0]:.1f}" + ("" if az_only else f"/{pos[1]:.1f}")
               + f" with the {body} at {az:.1f}" + ("" if az_only else f"/{el:.1f}") + ".")
