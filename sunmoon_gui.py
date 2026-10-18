@@ -399,10 +399,6 @@ class App:
         self.log = []
         self.cache = {}
         self.t = THEMES.get(self.cfg.get("theme"), THEMES["dark"])
-        if sm.MAC:
-            # Tk on macOS counts 72 points to the inch, Windows 96, so the same 10 pt came
-            # out a size smaller. This makes it the 13 px the rest of macOS uses.
-            root.tk.call("tk", "scaling", 96 / 72)
         self.f = self._fonts()
         self.scale = max(1.0, root.winfo_fpixels("1i") / 96)
         self.icon = int(52 * self.scale)
@@ -450,13 +446,22 @@ class App:
         ui = pick(("Segoe UI", "Ubuntu", "Cantarell", "Noto Sans", "DejaVu Sans", "Helvetica Neue"),
                   "TkDefaultFont")
 
+        def pt(size):
+            # Tk on macOS draws a point as one pixel and ignores "tk scaling" for text,
+            # where Windows and Linux use 96 to the inch, so 10 came out a size small
+            # (the CI screenshots). A third bigger is the same size, and body text
+            # lands on the 13 px the rest of macOS uses.
+            return round(size * 4 / 3) if sm.MAC else size
+
         def semi(size):
-            return ("Segoe UI Semibold", size) if "Segoe UI Semibold" in fams else (ui, size, "bold")
+            if "Segoe UI Semibold" in fams:
+                return ("Segoe UI Semibold", pt(size))
+            return (ui, pt(size), "bold")
 
         return {
-            "body": (ui, 10), "small": (ui, 9), "button": semi(10), "head": semi(10),
-            "label": semi(8), "title": semi(15), "big": (mono, 22), "num": (mono, 12),
-            "mono": (mono, 9), "arrow": (ui, 12),
+            "body": (ui, pt(10)), "small": (ui, pt(9)), "button": semi(10), "head": semi(10),
+            "label": semi(8), "title": semi(15), "big": (mono, pt(22)), "num": (mono, pt(12)),
+            "mono": (mono, pt(9)), "arrow": (ui, pt(12)),
         }
 
     def style_ttk(self):
