@@ -317,7 +317,9 @@ def next_crossing(body, station, start, min_el, rising, refraction, hours=48):
 # --- rotator ----------------------------------------------------------------
 
 class RotatorError(Exception):
-    pass
+    def __init__(self, msg, reply=""):
+        super().__init__(msg)
+        self.reply = reply                         # everything rotctl said, not just the last line
 
 
 def _last_line(text):
@@ -346,6 +348,14 @@ class Rotator:
     def __init__(self, exe, model, device, speed):
         if not os.path.isfile(exe):
             raise RotatorError(f"rotctl not found at {exe}, fix 'rotctl' in sunmoon.json")
+        # hamlib 4.3 (Ubuntu 22.04) only says "serial_open return(-6)" for both of
+        # these, so check the port ourselves and say which it is
+        if device and str(device).startswith("/dev/"):
+            if not os.path.exists(device):
+                raise RotatorError(f"could not open the rotator: {device}: No such file or directory")
+            if not os.access(device, os.R_OK | os.W_OK):
+                raise RotatorError(f"could not open the rotator: {device}: Permission denied")
+        self.az_turn = 0.0                         # see set_pos
         args = [exe, "-m", str(model)]
         if device:
             args += ["-r", str(device)]
@@ -376,7 +386,7 @@ class Rotator:
             if self.PROMPT in text:
                 reply = text.split(self.PROMPT)[0]
                 if "error =" in reply:
-                    raise RotatorError(f"could not {what}: {_last_line(reply)}")
+                    raise RotatorError(f"could not {what}: {_last_line(reply)}", reply)
                 return reply
             if self.proc.poll() is not None:
                 time.sleep(0.2)                    # let the reader drain
@@ -416,7 +426,23 @@ class Rotator:
         raise err
 
     def set_pos(self, az, el):
-        self._send(f"P {az:.1f} {el:.1f}", f"move to az {az:.1f} el {el:.1f}")
+        # Azimuth comes in as 0 to 360. Some rotators take -180 to 180 instead (hamlib
+        # 4.3's simulator, anything set up with min_az=-180,max_az=180), so when hamlib
+        # says "range problem", send the same direction a turn the other way, and keep
+        # using whichever turn worked last.
+        turns = [self.az_turn] + [t for t in (0.0, -360.0, 360.0) if t != self.az_turn]
+        for turn in turns:
+            try:
+                self._send(f"P {az + turn:.1f} {el:.1f}", f"move to az {az:.1f} el {el:.1f}")
+                self.az_turn = turn
+                return
+            except RotatorError as e:
+                said = e.reply + str(e)            # the debug line, or just the error code
+                if self.proc.poll() is not None or not ("range problem" in said
+                                                        or "Invalid parameter" in said):
+                    raise
+                err = e
+        raise err
 
     def stop(self):
         self._send("S", "stop")

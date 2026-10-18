@@ -83,6 +83,8 @@ for dev in ("/dev/ttyNOPE", "/dev/ttyS0"):
         print(f"      {dev}: SunMoon says {g.explain(str(e), {'device': dev})}")
         if dev == "/dev/ttyNOPE":
             check("There's no" in g.explain(str(e), {"device": dev}), "missing port explained")
+        elif not os.access(dev, os.R_OK | os.W_OK):
+            check("dialout" in g.explain(str(e), {"device": dev}), "no permission explained")
 
 # 4. the command line, no terminal
 write_cfg(min_el=min_el)
