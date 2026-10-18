@@ -12,6 +12,7 @@ macOS.
   title bar follows the theme, Cmd+Q stops the rotator before quitting, text the size the rest
   of macOS uses.
 - "by 2D0PEY" in the title bar.
+- README screenshot retaken on 1.4.0, and a macOS section added.
 - README: macOS section, and the screenshot retaken on 1.4.0.
 - A GitHub workflow that builds the app and tests it on macOS 14 and 15, Apple Silicon and
   Intel, with screenshots. One smoke test, `tests/smoke.py`, now covers Linux and the Mac.
