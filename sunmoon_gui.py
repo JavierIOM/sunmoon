@@ -23,6 +23,11 @@ from tkinter import filedialog, ttk
 
 import sunmoon as sm
 
+try:
+    import winreg
+except ImportError:
+    winreg = None
+
 APP = "SunMoon"
 
 THEMES = {
@@ -55,8 +60,10 @@ MODELS = [
 ]
 BAUDS = ["1200", "2400", "4800", "9600", "19200", "38400", "57600", "115200"]
 STEPS = (0.5, 1.0, 2.0, 5.0)
-PORT_KINDS = (("VCP", "FTDI"), ("Silabser", "CP210x"), ("CH34", "CH340"),
-              ("Prolific", "Prolific"), ("USBSER", "USB serial"), ("Serial", "built-in"))
+PORT_KINDS = (("VCP", "FTDI"), ("Silabser", "CP210x"), ("CH34", "CH340"), ("Prolific", "Prolific"),
+              ("USBSER", "USB serial"), ("BthModem", "Bluetooth"), ("Serial", "built-in"))
+# some drivers (a CH340, for one) call themselves \Device\Serial2, so go by the USB vendor
+USB_VENDORS = (("VID_0403", "FTDI"), ("VID_10C4", "CP210x"), ("VID_1A86", "CH340"), ("VID_067B", "Prolific"))
 # the same, from the names in /dev/serial/by-id
 PORT_KINDS_LINUX = (("FTDI", "FTDI"), ("Silicon_Labs", "CP210x"), ("CP210", "CP210x"),
                     ("1a86", "CH340"), ("QinHeng", "CH340"), ("CH34", "CH340"),
@@ -79,17 +86,45 @@ def model_name(model):
     return next((name for num, name in MODELS if num == model), f"hamlib model {model}")
 
 
-def short_port(dev):
-    """ttyUSB0 for a /dev/serial/by-id link, rather than 60 characters of FTDI serial number."""
-    if dev and dev.startswith("/dev/serial/by-id/") and os.path.exists(dev):
-        return os.path.basename(os.path.realpath(dev))
-    return dev
-
-
 def describe(cfg):
     if cfg["model"] == 1:
         return "simulator, nothing moves"
-    return f"{model_name(cfg['model'])} on {short_port(cfg.get('device')) or 'no port'}"
+    return f"{model_name(cfg['model'])} on {sm.short_port(cfg.get('device')) or 'no port'}"
+
+
+def _subkeys(key):
+    i = 0
+    while True:
+        try:
+            yield winreg.EnumKey(key, i)
+        except OSError:
+            return
+        i += 1
+
+
+def port_owners():
+    """{"COM11": "Bluetooth Incoming", ...}, from who Windows says owns each port. Bluetooth's
+    two kinds look alike and swap numbers, but an Incoming port's instance ID has no device
+    address in it. Holds ports that have since gone too, so only look up ones that are here."""
+    owners = {}
+    for bus in ("USB", "BTHENUM"):
+        try:
+            root = winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, rf"SYSTEM\CurrentControlSet\Enum\{bus}")
+        except OSError:
+            continue
+        for dev in _subkeys(root):
+            for inst in _subkeys(winreg.OpenKey(root, dev)):
+                try:
+                    with winreg.OpenKey(root, rf"{dev}\{inst}\Device Parameters") as params:
+                        port = winreg.QueryValueEx(params, "PortName")[0]
+                except OSError:
+                    continue
+                if bus == "BTHENUM":
+                    way = "Incoming" if "&000000000000_" in inst else "Outgoing"
+                    owners[port] = f"Bluetooth {way}"
+                else:
+                    owners[port] = next((label for vid, label in USB_VENDORS if vid in dev), "USB serial")
+    return owners
 
 
 def serial_ports():
@@ -115,13 +150,18 @@ def serial_ports():
             name = os.path.basename(link)
             kind = next((label for pat, label in PORT_KINDS_LINUX if pat.lower() in name.lower()),
                         "USB serial")
-            ports.append((link, f"{short_port(link)}  ({kind})"))
+            ports.append((link, f"{sm.short_port(link)}  ({kind})"))
+        # a Bluetooth GPS, once bound with rfcomm
+        ports += [(dev, f"{os.path.basename(dev)}  (Bluetooth)") for dev in glob.glob("/dev/rfcomm*")]
         return sorted(ports, key=lambda p: p[1])
     try:
-        import winreg
         key = winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, r"HARDWARE\DEVICEMAP\SERIALCOMM")
     except OSError:
         return []
+    try:
+        owners = port_owners()
+    except OSError:
+        owners = {}                            # only ever costs a label
     ports, i = [], 0
     while True:
         try:
@@ -130,13 +170,15 @@ def serial_ports():
             break
         i += 1
         kind = next((label for pat, label in PORT_KINDS if pat.lower() in dev.lower()), "")
+        if kind in ("Bluetooth", "built-in"):
+            kind = owners.get(port, kind)
         ports.append((port, f"{port}  ({kind})" if kind else port))
     return sorted(ports, key=lambda p: int(re.sub(r"\D", "", p[0]) or 0))
 
 
 def explain(err, cfg):
     """rotctl's error, turned into what to actually do about it."""
-    dev = short_port(cfg.get("device")) or "the port"
+    dev = sm.short_port(cfg.get("device")) or "the port"
     if "already open" in err or "Access denied" in err or "resource busy" in err:
         return (f"{dev} is in use by another program. Close whatever else drives the rotator "
                 f"({OTHER_PROGRAMS}), then Connect.")
@@ -212,7 +254,9 @@ class Tracker:
             try:
                 if cmd:
                     name, args = cmd[0], cmd[1:]
-                    if name in ("connect", "disconnect", "quit"):
+                    if name == "station":      # the GPS found us, no need to touch the rotator
+                        station = args[0]
+                    elif name in ("connect", "disconnect", "quit"):
                         if rot:
                             self._release(rot)
                             rot = None
@@ -290,6 +334,31 @@ class Tracker:
                     self._set(link="error", detail=str(e), pos=None, settled=False, target=None)
                 self._say(explain(str(e), cfg or {}), "bad")
                 next_poll = time.monotonic() + 2.0
+
+
+class GpsJob:
+    """One fix, on its own thread: it can take a minute, and neither the window nor the
+    rotator should wait for it. Whoever started it polls done, then reads fix or error."""
+
+    def __init__(self, device, after=None):
+        self.stop = threading.Event()
+        self.status = f"Listening on {sm.short_port(device)}"
+        self.fix = self.error = None
+        self.done = False
+        self.thread = threading.Thread(target=self._run, args=(device, after), daemon=True)
+        self.thread.start()
+
+    def _run(self, device, after):
+        if after:
+            after.join(3)                      # a job being cancelled, still on the same port
+        try:
+            self.fix = sm.take_fix(device, self.stop, self._say)
+        except sm.GpsError as e:
+            self.error = str(e)
+        self.done = True
+
+    def _say(self, text):
+        self.status = text
 
 
 # --- widgets ------------------------------------------------------------------
@@ -395,6 +464,7 @@ class App:
         except ValueError:
             self.station = None                # first run, or a config with no location in it
         self.tracker = Tracker()
+        self.gps = None                        # the fix being taken at startup
         self.mark = None
         self.log = []
         self.cache = {}
@@ -430,6 +500,9 @@ class App:
             root.after(300, lambda: Settings(self, first_run=True))
         else:
             self.connect()
+            if self.cfg["gps_port"]:
+                self.add_log("info", f"Asking the GPS on {sm.short_port(self.cfg['gps_port'])} where we are")
+                self.gps = GpsJob(self.cfg["gps_port"])
         self.tick()
 
     # fonts and theme
@@ -779,7 +852,35 @@ class App:
     def open_settings(self):
         Settings(self)
 
+    def took_fix(self, job):
+        """The startup fix is in. A GPS that's busy or off is no drama, the saved location stands."""
+        if job.error:
+            self.add_log("warn", f"{job.error} Using your saved location.")
+        elif job.fix:
+            fix = job.fix
+            moved = sm.apply_fix(self.cfg, fix)
+            if moved:
+                self.station = sm.station_from_cfg(self.cfg)
+                self.cache.clear()
+                self.mark = None
+                self.save()
+                self.tracker.send("station", self.station)
+            self.add_log("good", f"GPS: {fix['grid']}, {fix['sats']} sats, "
+                                 + ("location updated" if moved else "agrees with your saved location"))
+            warning = sm.clock_warning(fix["clock_s"])
+            if warning:
+                self.add_log("warn", warning)
+
+    def cancel_gps(self):
+        """Lets go of the startup fix, if it's still going. Returns its thread, to wait for."""
+        job, self.gps = self.gps, None
+        if job:
+            job.stop.set()
+            return job.thread
+        return None
+
     def close(self):
+        self.cancel_gps()
         self.tracker.send("quit")
         self.tracker.thread.join(timeout=4)
         self.root.destroy()
@@ -828,6 +929,9 @@ class App:
             except queue.Empty:
                 break
             self.add_log(kind, text)
+        if self.gps and self.gps.done:
+            job, self.gps = self.gps, None
+            self.took_fix(job)
 
         now = sm.utcnow()
         w["clock"].config(text=f"{now.astimezone():%H:%M:%S} local   {now:%H:%M} UTC")
@@ -965,9 +1069,12 @@ class App:
 class Settings(tk.Toplevel):
     """Settings, and on first run the setup: there is no station or port to assume."""
 
+    GPS_HINT = "Optional. An NMEA GPS on USB or Bluetooth finds you now, and at every start."
+
     def __init__(self, app, first_run=False):
         super().__init__(app.root)
         self.app = app
+        self.job = self.poll_id = None
         t, cfg = app.t, app.cfg
         self.withdraw()                       # build hidden, theme the title bar, then show
         self.title("Set up SunMoon" if first_run else "Settings")
@@ -1019,6 +1126,11 @@ class Settings(tk.Toplevel):
                          "and what drives your rotator. You can change any of this later in Settings.",
                     "small", "muted", wraplength=760, justify="left").pack(anchor="w", pady=(2, 14))
 
+        self.ports = {label: dev for dev, label in serial_ports()}
+
+        def port_label(dev):
+            return next((label for label, d in self.ports.items() if d == dev), dev)
+
         section(left, "STATION")
         field(left, "Grid locator", entry(left, "grid", cfg["grid"]),
               "Your Maidenhead locator, e.g. IO74RE.")
@@ -1026,6 +1138,15 @@ class Settings(tk.Toplevel):
         field(left, "Longitude", entry(left, "lon", cfg.get("lon")),
               "Optional, beats the grid square. Decimal degrees, west negative.")
         field(left, "Height (m)", entry(left, "alt_m", cfg.get("alt_m", 0)))
+        self.v["gps_port"] = tk.StringVar(value=port_label(cfg.get("gps_port") or ""))
+        field(left, "GPS port", ttk.Combobox(left, textvariable=self.v["gps_port"], values=list(self.ports),
+                                             width=26, font=app.f["body"]))
+        gf = tk.Frame(left, bg=t["card"])
+        gf.grid(row=nxt(left), column=1, sticky="w", pady=(2, 4))
+        self.gps_btn = FlatButton(gf, app, "Get position", self.get_position, padx=10, pady=3)
+        self.gps_btn.pack(anchor="w")
+        self.gps_note = app.lab(gf, self.GPS_HINT, "small", "faint", wraplength=330, justify="left")
+        self.gps_note.pack(anchor="w", pady=(4, 0))
 
         section(left, "POINTING")
         field(left, "Lowest elevation", entry(left, "min_el", cfg["min_el"]),
@@ -1044,10 +1165,7 @@ class Settings(tk.Toplevel):
                                            font=app.f["body"]),
               "Not listed? Type its hamlib number (rotctl -l).")
 
-        self.ports = {label: dev for dev, label in serial_ports()}
-        dev = cfg.get("device") or ""
-        cur = next((label for label, d in self.ports.items() if d == dev), dev)
-        self.v["device"] = tk.StringVar(value=cur)
+        self.v["device"] = tk.StringVar(value=port_label(cfg.get("device") or ""))
         field(right, "Port", ttk.Combobox(right, textvariable=self.v["device"], values=list(self.ports),
                                           width=30, font=app.f["body"]),
               "For rotctld use model 2 and host:port, e.g. 127.0.0.1:4533.")
@@ -1082,6 +1200,7 @@ class Settings(tk.Toplevel):
         FlatButton(btns, app, "Cancel", self.destroy).pack(side="right", padx=(0, 8))
         self.bind("<Return>", lambda e: self.save())
         self.bind("<Escape>", lambda e: self.destroy())
+        self.protocol("WM_DELETE_WINDOW", self.destroy)
 
         self.update_idletasks()
         app.dark_titlebar(self)
@@ -1126,6 +1245,56 @@ class Settings(tk.Toplevel):
         if path:
             self.v["rotctl"].set(path)
 
+    def port_of(self, key):
+        text = self.v[key].get().strip()
+        return self.ports.get(text) or (text.split()[0] if text else "")
+
+    def get_position(self):
+        """Asks the GPS, and fills in the form. A second press calls it off."""
+        if self.job:
+            self.end_gps()
+            self.gps_note.config(text=self.GPS_HINT, fg=self.app.t["faint"])
+            return
+        device = self.port_of("gps_port")
+        if not device:
+            self.gps_note.config(text="Pick the GPS's port first.", fg=self.app.t["warn"])
+            return
+        self.job = GpsJob(device, self.app.cancel_gps())
+        self.gps_btn.set(text="Cancel")
+        self.poll_gps()
+
+    def poll_gps(self):
+        t, job = self.app.t, self.job
+        self.gps_note.config(text=job.status, fg=t["muted"])
+        if not job.done:
+            self.poll_id = self.after(200, self.poll_gps)
+            return
+        self.end_gps()
+        if job.error:
+            self.gps_note.config(text=job.error, fg=t["bad"])
+        elif job.fix:
+            fix = job.fix
+            self.v["grid"].set(fix["grid"])
+            self.v["lat"].set(f"{fix['lat']:.5f}")
+            self.v["lon"].set(f"{fix['lon']:.5f}")
+            self.v["alt_m"].set(f"{fix['alt_m']:g}")
+            warning = sm.clock_warning(fix["clock_s"])
+            self.gps_note.config(text=warning or f"Got it, from {fix['sats']} satellites.",
+                                 fg=t["warn"] if warning else t["good"])
+
+    def end_gps(self):
+        if self.poll_id:
+            self.after_cancel(self.poll_id)
+            self.poll_id = None
+        if self.job:
+            self.job.stop.set()
+            self.job = None
+        self.gps_btn.set(text="Get position")
+
+    def destroy(self):
+        self.end_gps()
+        super().destroy()
+
     def save(self):
         try:
             new = self.collect()
@@ -1158,21 +1327,29 @@ class Settings(tk.Toplevel):
             raise ValueError("Where are you? Give your grid locator, e.g. IO74RE.")
         if lat is None and not sm.GRID_RE.fullmatch(grid):
             raise ValueError("That grid locator doesn't look right. Four or six characters, e.g. IO74RE.")
+        # lat and lon win, so a grid typed over a position the GPS filled in would quietly do nothing
+        if lat is not None and sm.GRID_RE.fullmatch(grid):
+            there = sm.latlon_to_grid(lat, lon)[:len(grid)]
+            if there != grid:
+                raise ValueError(f"The grid locator says {grid}, but that latitude and longitude are in "
+                                 f"{there}. Change one, or clear it.")
         m = re.match(r"\s*(\d+)", v["model"])
         if not m:
             raise ValueError("Model needs a hamlib model number, e.g. 603.")
         model = int(m[1])
-        port = v["device"].strip()
-        device = self.ports.get(port) or (port.split()[0] if port else "")
+        device = self.port_of("device")
         if model != 1 and not device:
             raise ValueError("Pick the rotator's port.")
+        gps_port = self.port_of("gps_port")
+        if model != 1 and gps_port == device:
+            raise ValueError("The GPS and the rotator can't share a port.")
         rotctl = v["rotctl"].strip().replace("\\", "/")
         if not os.path.isfile(rotctl):
             if sm.WINDOWS:
                 raise ValueError("Can't find rotctl.exe there. Install hamlib (link above), then Browse to it.")
             raise ValueError(f"Can't find rotctl there. Install hamlib ({sm.HAMLIB_INSTALL}).")
         return {
-            "model": model, "device": device or None, "speed": int(v["speed"]),
+            "model": model, "device": device or None, "speed": int(v["speed"]), "gps_port": gps_port,
             "az_only": bool(v["az_only"]), "rotctl": rotctl, "grid": grid or self.app.cfg["grid"],
             "lat": lat, "lon": lon, "alt_m": num("alt_m", "Height", -500, 9000),
             "min_el": num("min_el", "Lowest elevation", -2, 60),

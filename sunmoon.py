@@ -16,6 +16,7 @@ Whatever the rotator reads minus where the body really is, is your offset.
     python sunmoon.py moon           same for the moon
     python sunmoon.py sun --once     point, wait for it to settle, report, exit
     python sunmoon.py sun --dummy    rehearse against hamlib's simulated rotator
+    python sunmoon.py gps            ask an NMEA GPS where we are, and save it
 
 Rotator and station settings live in sunmoon.json: on Windows next to the
 program, or in %APPDATA%/SunMoon when the program's folder is read-only; on
@@ -24,6 +25,8 @@ Standard library only, nothing to pip install.
 """
 
 import argparse
+import ctypes
+import errno
 import glob
 import json
 import os
@@ -48,7 +51,7 @@ try:
 except ImportError:
     termios = None
 
-__version__ = "1.4.0"
+__version__ = "1.5.0"
 
 WINDOWS = os.name == "nt"
 MAC = sys.platform == "darwin"
@@ -98,6 +101,7 @@ DEFAULTS = {
     "device": "",          # serial port, or host:port with model 2 (rotctld)
     "speed": 9600,         # serial baud, ignored for network models
     "az_only": False,      # true for an azimuth-only rotator
+    "gps_port": "",        # an NMEA GPS's serial port, asked once at each start. Blank for none
     "grid": "",            # Maidenhead locator, used when lat/lon are null
     "lat": None,
     "lon": None,
@@ -154,6 +158,14 @@ def grid_to_latlon(grid):
         lon += 1.0
         lat += 0.5
     return lat, lon
+
+
+def latlon_to_grid(lat, lon):
+    """The 6 character Maidenhead locator a position sits in."""
+    lon, lat = min(lon + 180, 359.999), min(lat + 90, 179.999)
+    return (chr(65 + int(lon // 20)) + chr(65 + int(lat // 10))
+            + str(int(lon % 20 // 2)) + str(int(lat % 10))
+            + chr(65 + int(lon % 2 * 12)) + chr(65 + int(lat % 1 * 24)))
 
 
 def _sun_elements(d):
@@ -469,6 +481,286 @@ class Rotator:
             self.proc.kill()
 
 
+# --- GPS --------------------------------------------------------------------
+#
+# Any NMEA GPS on a serial port, USB or Bluetooth. One fix, saved with the settings, then
+# the port goes straight back: a Bluetooth port only takes one program, and a position
+# good to a kilometre or two is already right to 0.02 deg. It never retries on its own:
+# twice Windows' RFCOMM driver has died while a program hammered a dead Bluetooth port.
+# No pyserial, as the little this needs is in the operating system.
+
+GPS_BAUDS = (115200, 9600, 4800, 38400)    # Bluetooth ignores this, USB doesn't
+GPS_BAUD_S = 3             # how long to try each baud before the next
+GPS_SILENT_S = 45          # give up if it says nothing. OscarGPS dials in on a 14 s cycle
+GPS_NO_FIX_S = 120         # give up if it talks but never gets a fix
+CLOCK_WARN_S = 10          # a clock this far out is 0.04 deg of sun
+
+
+class GpsError(Exception):
+    """Says why there's no fix, in words fit to show."""
+
+
+def short_port(dev):
+    """ttyUSB0 for a /dev/serial/by-id link, rather than 60 characters of FTDI serial number."""
+    if dev and dev.startswith("/dev/serial/by-id/") and os.path.exists(dev):
+        return os.path.basename(os.path.realpath(dev))
+    return dev
+
+
+def _port_error(device, why):
+    """What to do about a port that won't open: busy, missing, denied, or the OS's own words."""
+    name = short_port(device)
+    if why == "busy":
+        return f"{name} is in use. Close whatever else has it (OscarWatch, say), then try again."
+    if why == "missing" and WINDOWS:
+        return (f"Windows can't find {name}. Is it plugged in? If it's a Bluetooth port, close "
+                "anything else using Bluetooth ports, turn Bluetooth off and on, and try again.")
+    if why == "missing":
+        return f"There's no {name} on this computer. Is the GPS plugged in?"
+    if why == "no answer":
+        return (f"Nothing answered on {name}. Is the GPS on, and is this its port? OscarGPS names "
+                "the right one on its screen.")
+    if why == "denied" and MAC:
+        return f"macOS won't let SunMoon open {name}. Unplug the GPS, plug it back in, and try again."
+    if why == "denied":
+        return (f"Linux won't let you open {name}. Add yourself to the dialout group "
+                "(sudo usermod -aG dialout $USER), log out and back in, and try again.")
+    return f"Couldn't open {name}: {why}"
+
+
+class _Dcb(ctypes.Structure):
+    _fields_ = [("DCBlength", ctypes.c_ulong), ("BaudRate", ctypes.c_ulong), ("flags", ctypes.c_ulong),
+                ("wReserved", ctypes.c_ushort), ("XonLim", ctypes.c_ushort), ("XoffLim", ctypes.c_ushort),
+                ("ByteSize", ctypes.c_ubyte), ("Parity", ctypes.c_ubyte), ("StopBits", ctypes.c_ubyte),
+                ("chars", ctypes.c_char * 5), ("wReserved1", ctypes.c_ushort)]
+
+
+class _WinPort:
+    """A COM port through the Win32 API. Only ever read."""
+
+    def __init__(self, device):
+        self.k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        self.k32.CreateFileW.restype = ctypes.c_void_p
+        self.k32.CreateFileW.argtypes = (ctypes.c_wchar_p, ctypes.c_ulong, ctypes.c_ulong, ctypes.c_void_p,
+                                         ctypes.c_ulong, ctypes.c_ulong, ctypes.c_void_p)
+        # GENERIC_READ | GENERIC_WRITE, no sharing, OPEN_EXISTING. Bluetooth can block here a while.
+        handle = self.k32.CreateFileW("\\\\.\\" + device, 0xC0000000, 0, None, 3, 0, None)
+        if handle is None or handle == ctypes.c_void_p(-1).value:
+            code = ctypes.get_last_error()
+            # 1168 is what a paired device with no serial service gets you: "Element not found"
+            why = {5: "busy", 2: "missing", 3: "missing", 31: "no answer", 121: "no answer", 1167: "no answer",
+                   1168: "no answer"}.get(code, ctypes.FormatError(code))
+            raise GpsError(_port_error(device, why))
+        self.h = ctypes.c_void_p(handle)
+        self.buf = ctypes.create_string_buffer(4096)
+        # hand back whatever's there as soon as there's anything, or nothing after 200 ms
+        self.k32.SetCommTimeouts(self.h, (ctypes.c_ulong * 5)(0xFFFFFFFF, 0xFFFFFFFF, 200, 0, 0))
+
+    def set_baud(self, baud):
+        dcb = _Dcb(DCBlength=ctypes.sizeof(_Dcb))
+        if self.k32.GetCommState(self.h, ctypes.byref(dcb)):
+            # flags 1 is binary and nothing else: no flow control, and DTR and RTS held off,
+            # as raising them can reset an ESP32 or key a radio
+            dcb.BaudRate, dcb.flags, dcb.ByteSize, dcb.Parity, dcb.StopBits = baud, 1, 8, 0, 0
+            self.k32.SetCommState(self.h, ctypes.byref(dcb))
+
+    def read(self):
+        got = ctypes.c_ulong(0)
+        if not self.k32.ReadFile(self.h, self.buf, len(self.buf), ctypes.byref(got), None):
+            time.sleep(0.2)                        # the link went, let the clock run out
+            return b""
+        return self.buf.raw[:got.value]
+
+    def close(self):
+        self.k32.CloseHandle(self.h)
+
+
+class _PosixPort:
+    """The same on Linux and macOS, through termios."""
+
+    def __init__(self, device):
+        try:
+            self.fd = os.open(device, os.O_RDWR | os.O_NOCTTY | os.O_NONBLOCK)
+        except OSError as e:
+            why = {errno.EBUSY: "busy", errno.ENOENT: "missing", errno.EACCES: "denied"}.get(e.errno, e.strerror)
+            raise GpsError(_port_error(device, why))
+
+    def set_baud(self, baud):
+        try:
+            attrs = termios.tcgetattr(self.fd)
+            attrs[:4] = [0, 0, termios.CS8 | termios.CREAD | termios.CLOCAL, 0]
+            attrs[4] = attrs[5] = getattr(termios, f"B{baud}")
+            attrs[6][termios.VMIN] = attrs[6][termios.VTIME] = 0
+            termios.tcsetattr(self.fd, termios.TCSANOW, attrs)
+        except (termios.error, AttributeError):
+            pass                                   # it may still be talking at the speed it's on
+
+    def read(self):
+        data = b""
+        if select.select([self.fd], [], [], 0.2)[0]:
+            try:
+                data = os.read(self.fd, 4096)
+            except OSError:
+                pass
+            if not data:
+                time.sleep(0.2)                    # the port went, let the clock run out
+        return data
+
+    def close(self):
+        os.close(self.fd)
+
+
+def nmea_fields(line):
+    """A sentence's fields, its id first, e.g. ["GNGGA", "120000.000", ...]. None if its checksum
+    isn't right, which is also what becomes of the # status lines OscarGPS puts on USB."""
+    body, _, check = line.strip().rpartition("*")
+    if not body.startswith("$"):
+        return None
+    cs = 0
+    for ch in body[1:]:
+        cs ^= ord(ch)
+    try:
+        return body[1:].split(",") if int(check, 16) == cs else None
+    except ValueError:
+        return None
+
+
+def _nmea_angle(value, hemisphere):
+    """ddmm.mmmm or dddmm.mmmm to signed degrees."""
+    x = float(value)
+    deg = x // 100
+    angle = deg + (x - deg * 100) / 60
+    return -angle if hemisphere in ("S", "W") else angle
+
+
+def _nmea_fix(parts):
+    """The position in a GGA sentence, or None if it hasn't got one yet."""
+    if int(parts[6] or 0) == 0 or not parts[2] or not parts[4]:
+        return None
+    lat = round(_nmea_angle(parts[2], parts[3]), 5)
+    lon = round(_nmea_angle(parts[4], parts[5]), 5)
+    return {"lat": lat, "lon": lon, "alt_m": round(float(parts[9])) if parts[9] else 0,
+            "grid": latlon_to_grid(lat, lon), "sats": int(parts[7] or 0)}
+
+
+def _nmea_time(parts):
+    """The UTC in an RMC sentence."""
+    t, d = parts[1], parts[9]
+    return datetime(2000 + int(d[4:6]), int(d[2:4]), int(d[:2]),
+                    int(t[:2]), int(t[2:4]), int(t[4:6]), tzinfo=timezone.utc)
+
+
+def take_fix(device, stop=None, say=None, silent_s=GPS_SILENT_S, no_fix_s=GPS_NO_FIX_S):
+    """One position from an NMEA GPS: lat, lon, alt_m, grid, sats, and clock_s, how far this
+    computer's clock is ahead of the GPS (None if its RMC has no date). A fix counts once GGA
+    has a fix quality and RMC says A, in whichever order they come, and the latest of each
+    wins. None if stop got set. Raises GpsError when it can't. Takes a while, so not on the
+    window's thread. The clock figure is only for warning about: NMEA lands a few tenths late."""
+    said = []
+
+    def tell(text):
+        if say and said[-1:] != [text]:
+            said.append(text)
+            say(text)
+
+    name = short_port(device)
+    tell(f"Listening on {name}")
+    port = _WinPort(device) if WINDOWS else _PosixPort(device)
+    bauds = list(GPS_BAUDS)
+    buf, noise, talking = b"", False, False
+    fix, active, clock_s = None, None, None    # active: RMC's status, None until one's been heard
+    started = time.monotonic()
+    next_baud = 0.0
+    try:
+        while not (stop and stop.is_set()):
+            now = time.monotonic()
+            if fix and active:
+                return dict(fix, clock_s=clock_s)
+            if talking and now - started > no_fix_s:
+                raise GpsError(f"The GPS on {name} is talking, but has no fix after {no_fix_s} s. "
+                               "Give it a view of the sky.")
+            if not talking and now - started > silent_s:
+                raise GpsError(f"{name} is talking, but not in NMEA. Is it the GPS's port?" if noise else
+                               f"Nothing from {name} in {silent_s} s. Is the GPS on, and is this its "
+                               "port? OscarGPS names the right one on its screen.")
+            if not talking and now >= next_baud:
+                port.set_baud(bauds[0])
+                bauds.append(bauds.pop(0))
+                next_baud = now + GPS_BAUD_S
+            data = port.read()
+            noise = noise or bool(data.strip(b"\r\n\x00"))
+            *lines, buf = (buf + data).split(b"\n")
+            buf = buf[-200:]
+            for raw in lines:
+                parts = nmea_fields(raw.decode("ascii", "replace"))
+                if not parts:
+                    continue
+                talking = True
+                kind = "" if parts[0].startswith("P") else parts[0][-3:]   # P is proprietary, not a talker
+                try:
+                    if kind == "RMC":
+                        active = parts[2] == "A"
+                        if active:
+                            clock_s = (utcnow() - _nmea_time(parts)).total_seconds()
+                    elif kind == "GGA":
+                        fix = _nmea_fix(parts)
+                        if not fix or active is False:
+                            tell(f"Hearing the GPS on {name}, no fix yet ({int(parts[7] or 0)} sats)")
+                except (IndexError, ValueError):
+                    continue
+    finally:
+        port.close()
+    return None
+
+
+def apply_fix(cfg, fix):
+    """Puts a fix in the settings. False if it's within about 100 m of where they already say
+    we are, so the GPS wandering doesn't rewrite them at every start."""
+    try:
+        s = station_from_cfg(cfg)
+        if (abs(s.lat - fix["lat"]) < 0.001
+                and abs(angdiff(s.lon, fix["lon"])) * cos(radians(s.lat)) < 0.001):
+            return False
+    except ValueError:
+        pass                                       # no location yet, so any fix is news
+    cfg.update(lat=fix["lat"], lon=fix["lon"], alt_m=fix["alt_m"], grid=fix["grid"])
+    return True
+
+
+def clock_warning(clock_s):
+    """Something to say if this computer's clock is far enough out to matter, else nothing."""
+    if clock_s is None or abs(clock_s) < CLOCK_WARN_S:
+        return ""
+    way = "fast" if clock_s > 0 else "slow"
+    return (f"This computer's clock is {abs(clock_s):.0f} s {way} against GPS time, which puts the sun "
+            f"and moon about {abs(clock_s) / 240:.2f} deg out. Set it right before marking a reading.")
+
+
+def cmd_gps(cfg, device):
+    if not device:
+        print("No GPS port. Say which with --device, or set it in SunMoon's Settings.")
+        return 2
+    try:
+        fix = take_fix(device, say=print)
+        print(f"{fix['lat']:.5f}, {fix['lon']:.5f}, {fix['alt_m']:g} m, {fix['grid']}, {fix['sats']} sats")
+        moved = apply_fix(cfg, fix)
+        cfg["gps_port"] = device
+        save_config(cfg)
+    except GpsError as e:
+        print(e)
+        return 2
+    except OSError as e:
+        print(f"Couldn't save settings: {e}")
+        return 2
+    except KeyboardInterrupt:
+        return 1
+    print(f"Location saved to {CONFIG_PATH}" if moved else "That's where you already said you are.")
+    warning = clock_warning(fix["clock_s"])
+    if warning:
+        print(warning)
+    return 0
+
+
 # --- the bit you look at ----------------------------------------------------
 
 ARROWS = {"H": "up", "P": "down", "K": "left", "M": "right"}
@@ -780,7 +1072,7 @@ def station_from_cfg(cfg):
 
 def main():
     ap = argparse.ArgumentParser(description="Point the antenna at the sun or moon via rotctl.")
-    ap.add_argument("target", choices=["sun", "moon", "where"])
+    ap.add_argument("target", choices=["sun", "moon", "where", "gps"])
     ap.add_argument("--once", action="store_true", help="point, wait to settle, report, exit")
     ap.add_argument("--dummy", action="store_true", help="use hamlib's simulated rotator")
     ap.add_argument("--model", type=int, help="hamlib rotator model, overrides sunmoon.json")
@@ -795,6 +1087,8 @@ def main():
     except (OSError, ValueError) as e:
         print(f"sunmoon.json is broken: {e}")
         return 2
+    if args.target == "gps":                   # here, as --device is the GPS's port for this one
+        return cmd_gps(cfg, args.device or cfg["gps_port"])
     if args.model is not None:
         cfg["model"] = args.model
     if args.device is not None:

@@ -76,7 +76,8 @@ simulator. Same as Linux: tell us how you get on with a real rotator.
 
 SunMoon asks for:
 
-- **Your location:** your grid locator, or latitude and longitude if you want it exact.
+- **Your location:** your grid locator, or latitude and longitude if you want it exact, or
+  [let a GPS find you](#let-a-gps-find-you).
 - **Your rotator:** its hamlib model, the serial port (the list shows the chip behind each port,
   FTDI or CP210x, so you don't pick your radio by mistake) and the baud rate. On Linux the
   port is saved by its `/dev/serial/by-id` name, which stays put when `ttyUSB0` and `ttyUSB1`
@@ -129,10 +130,44 @@ All in the **Settings** window.
 | Model | hamlib rotator model. Any number `rotctl -l` lists. For a running rotctld use model 2 and port `127.0.0.1:4533` |
 | Azimuth-only | Elevation is sent as 0 and the up and down nudges go away |
 | rotctl | Found automatically. Windows: the one in the zip, or a newer hamlib you've installed. Linux: the distro's. macOS: the one inside the app. Browse to pick a different one |
+| GPS port | An NMEA GPS to ask where you are, once at every start. Blank for none |
 
 On Windows they're saved to `sunmoon.json` next to `SunMoon.exe`, or to `%APPDATA%\SunMoon` if
 that folder is read-only (say you unzipped it into Program Files). On Linux they're in
 `~/.config/sunmoon/sunmoon.json`, and on macOS in `~/Library/Application Support/SunMoon`.
+
+## Let a GPS find you
+
+Got an NMEA GPS on a serial port? SunMoon can ask it where you are, so there's nothing to type.
+In **Settings**, pick it under **GPS port** and press **Get position**. After that SunMoon asks
+once each time it starts, and updates your location if you've moved more than about 100 m. If
+the GPS is off, or another program has the port, it says so and carries on with your saved
+location.
+
+Anything that sends GGA and RMC sentences will do, at 4800, 9600, 38400 or 115200 baud: SunMoon
+works out which. It takes one fix and lets go of the port, and it only ever reads.
+
+This is a convenience more than an accuracy gain. The middle of a six-character grid square is
+already right to under a tenth of a degree, though the middle of a four-character one can be a
+whole degree out. Height makes no measurable difference. If your computer's clock is 10 seconds
+or more off GPS time SunMoon warns you, since a minute is a quarter of a degree, but it won't
+change the clock.
+
+Your position then shows in SunMoon's header to about 10 m, so mind that if you post a screenshot.
+
+**With [OscarGPS](https://github.com/JavierIOM/OscarGPS):**
+
+- **USB:** pick its port, labelled `CH340` on the usual board. This runs alongside OscarWatch on
+  Bluetooth, as USB is a separate stream.
+- **Bluetooth on Windows:** pick the port labelled `Bluetooth Incoming`, which is the one
+  OscarGPS names on its screen. The board dials the PC, so give it 15 seconds. Only one program
+  can hold that port, so it won't work while OscarWatch has it. Port numbers can change after
+  a Bluetooth reset, so go by the label.
+- **Linux and macOS:** use USB. OscarGPS's Bluetooth is built around Windows' Incoming ports.
+  Its README has a Linux route, which shows up here as `rfcomm0`.
+
+Linux doesn't lock serial ports, so if another program is reading the GPS, each gets only some
+of the sentences. Close the other one first.
 
 ## Accuracy
 
@@ -195,8 +230,8 @@ The [Linux](.github/workflows/linux.yml) and [macOS](.github/workflows/macos.yml
 build on every push and test what they built with `tests/smoke.py`: the `.deb` installed on
 Ubuntu 22.04, 24.04 and 24.04 ARM, and the app on macOS 14 and 15, Apple Silicon and Intel.
 That covers the rotctl driver against hamlib's simulator, the error messages, the command line
-with and without a terminal, that the program finds its own rotctl, and the window, with
-screenshots saved as artifacts.
+with and without a terminal, that the program finds its own rotctl, the window, and the GPS
+reader against a pretend GPS, with screenshots saved as artifacts.
 
 On Windows the first build makes a venv with PyInstaller and Pillow in `%LOCALAPPDATA%\sunmoon-build`, and
 downloads the official `hamlib-w64-4.7.0.zip` and `hamlib-4.7.0.tar.gz` there, checking both
@@ -213,6 +248,7 @@ python sunmoon.py where          sun and moon az/el and rise/set, no rotator
 python sunmoon.py sun            track the sun, arrow keys nudge, Space marks
 python sunmoon.py moon --once    point, wait for it to settle, report, exit
 python sunmoon.py sun --dummy    against hamlib's simulator
+python sunmoon.py gps --device COM13    ask a GPS where we are, and save it
 ```
 
 ## Licence

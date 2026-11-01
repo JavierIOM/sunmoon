@@ -1,5 +1,25 @@
 # Changelog
 
+## [1.5.0] - 2026-11-01
+
+Let a GPS find you.
+
+### Added
+- GPS port and Get position in Settings, for any NMEA GPS on USB or Bluetooth, which fills in
+  your location, grid and height. SunMoon then asks once at every start, updates your location
+  if you've moved more than about 100 m, and carries on with the saved one if the GPS is off or
+  busy. It takes one fix, lets go of the port, and only ever reads.
+- `sunmoon gps` on the command line does the same and saves it.
+- A warning if the computer's clock is 10 seconds or more off GPS time. It won't change the clock.
+
+### Changed
+- The Windows port list says which Bluetooth ports are Incoming and which Outgoing, and goes by
+  the USB vendor where a driver hides it, so a CH340 no longer shows as built-in. Linux lists
+  `/dev/rfcomm` ports too.
+- Settings won't save a grid locator and a latitude and longitude that disagree, as the latitude
+  and longitude would silently win.
+- README screenshot retaken on 1.5.0.
+
 ## [1.4.0] - 2026-10-18
 
 macOS.
@@ -13,7 +33,6 @@ macOS.
   of macOS uses.
 - "by 2D0PEY" in the title bar.
 - README screenshot retaken on 1.4.0, and a macOS section added.
-- README: macOS section, and the screenshot retaken on 1.4.0.
 - A GitHub workflow that builds the app and tests it on macOS 14 and 15, Apple Silicon and
   Intel, with screenshots. One smoke test, `tests/smoke.py`, now covers Linux and the Mac.
 

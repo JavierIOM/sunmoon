@@ -11,7 +11,8 @@ is what the app is built from.
 
 Checks the rotctl driver against hamlib's simulator, what the errors say, the
 command line with and without a terminal, that the program finds the right
-rotctl, and the window, and saves screenshots into the folder given.
+rotctl, the window, and the GPS reader against a pretend GPS on a pty, and saves
+screenshots into the folder given.
 """
 
 import argparse
@@ -23,7 +24,10 @@ import select
 import subprocess
 import sys
 import tempfile
+import threading
 import time
+import tty
+from datetime import timedelta
 
 ap = argparse.ArgumentParser()
 ap.add_argument("--mac", metavar="APP", help="test this SunMoon.app rather than the Linux install")
@@ -226,6 +230,165 @@ if app.mark:
 check(result.get("done"), "light theme drawn")
 for line in app.log:
     print("     ", *line)
+
+# 9. the GPS, a pretend one on a pty. It sits at the Royal Observatory, Greenwich.
+GREENWICH = "5128.6740,N,00000.0900,W"
+
+
+def nmea(body):
+    cs = 0
+    for ch in body:
+        cs ^= ord(ch)
+    return f"${body}*{cs:02X}\r\n".encode()
+
+
+def gga(quality=1):
+    pos = GREENWICH if quality else ",,,"
+    return nmea(f"GNGGA,{sm.utcnow():%H%M%S}.000,{pos},{quality},9,1.0,46.0,M,47.0,M,,")
+
+
+def rmc(status="A", late_s=0):
+    t = sm.utcnow() - timedelta(seconds=late_s)
+    pos = GREENWICH if status == "A" else ",,,"
+    return nmea(f"GNRMC,{t:%H%M%S}.000,{status},{pos},0.10,0.00,{t:%d%m%y},,,A")
+
+
+class FakeGps:
+    """A pty that says whatever talk() returns, five times a second."""
+
+    def __init__(self, talk):
+        self.master, self.slave = pty.openpty()
+        tty.setraw(self.slave)
+        os.set_blocking(self.master, False)
+        self.path = os.ttyname(self.slave)
+        self.talk, self.on = talk, True
+        threading.Thread(target=self._run, daemon=True).start()
+
+    def _run(self):
+        while self.on:
+            try:
+                os.write(self.master, self.talk())
+            except OSError:
+                pass                           # nobody reading and the buffer's full
+            time.sleep(0.2)
+
+    def close(self):
+        self.on = False
+        time.sleep(0.3)
+        os.close(self.master)
+        os.close(self.slave)
+
+
+def fix_from(talk, **kw):
+    """(the fix, or None, and what GpsError said, or "")"""
+    gps = FakeGps(talk)
+    try:
+        return sm.take_fix(gps.path, **kw), ""
+    except sm.GpsError as e:
+        return None, str(e)
+    finally:
+        gps.close()
+
+
+check(sm.latlon_to_grid(51.4779, -0.0015) == "IO91XL", "grid from a position")
+check(sm.latlon_to_grid(-33.8688, 151.2093) == "QF56OD", "grid from a position, south and east")
+
+fix, err = fix_from(lambda: b"# a status line\r\n" + gga() + rmc())
+print("      fix:", fix, err)
+check(bool(fix) and abs(fix["lat"] - 51.4779) < 1e-4 and abs(fix["lon"] + 0.0015) < 1e-4,
+      "position, west of Greenwich is negative")
+check(bool(fix) and fix["grid"] == "IO91XL" and fix["alt_m"] == 46 and fix["sats"] == 9,
+      "grid, height and satellites")
+check(bool(fix) and abs(fix["clock_s"]) < 5 and sm.clock_warning(fix["clock_s"]) == "", "clock agrees, no warning")
+
+fix, err = fix_from(lambda: rmc() + gga())
+check(bool(fix), "RMC before GGA is a fix too")
+
+fix, err = fix_from(lambda: gga() + rmc("A", late_s=120))
+check(bool(fix) and 110 < fix["clock_s"] < 130, "clock 120 s out is spotted")
+check("120 s fast" in sm.clock_warning(120) and "0.50 deg" in sm.clock_warning(120), "and warned about")
+
+bad = b"$GNGGA,120000.000,0000.0000,N,00000.0000,E,1,9,1.0,0.0,M,0.0,M,,*00\r\n"
+fix, err = fix_from(lambda: bad + gga() + rmc())
+check(bool(fix) and fix["lat"] > 51, "a sentence with a bad checksum is ignored")
+
+for what, talk in (("GGA with no fix, RMC void", lambda: gga(0) + rmc("V")),
+                   ("GGA fix but RMC void", lambda: gga() + rmc("V")),
+                   ("RMC active but GGA no fix", lambda: gga(0) + rmc()),
+                   ("GGA fix and no RMC at all", lambda: gga())):
+    fix, err = fix_from(talk, no_fix_s=1.5)
+    check(fix is None and "no fix" in err, f"{what}: not trusted: {err}")
+
+fix, err = fix_from(lambda: b"", silent_s=1.5)
+check(fix is None and "Nothing from" in err, f"silence: {err}")
+fix, err = fix_from(lambda: bytes(range(128, 200)), silent_s=1.5)
+check(fix is None and "not in NMEA" in err, f"garbage: {err}")
+gps = FakeGps(lambda: b"")
+stop = threading.Event()
+threading.Timer(1.0, stop.set).start()
+t0 = time.time()
+check(sm.take_fix(gps.path, stop) is None and time.time() - t0 < 3, "calling it off lets go promptly")
+gps.close()
+try:
+    sm.take_fix("/dev/ttyNOPE")
+    check(False, "a missing port raises")
+except sm.GpsError as e:
+    check("There's no" in str(e), f"missing port: {e}")
+
+# the command line finds us and saves it, and leaves the rotator's port alone
+gps = FakeGps(lambda: gga() + rmc())
+write_cfg(device="/dev/rotator")
+r = subprocess.run(CLI + ["gps", "--device", gps.path], capture_output=True, text=True, timeout=60)
+print(r.stdout, r.stderr)
+with open(sm.CONFIG_PATH) as fh:
+    saved = json.load(fh)
+check(r.returncode == 0 and abs(saved.get("lat", 0) - 51.4779) < 1e-4, "gps on the command line saves the fix")
+check(saved.get("gps_port") == gps.path and saved.get("device") == "/dev/rotator", "and the right ports")
+
+# the program as built asks at startup, and the rotator's connected meanwhile
+write_cfg(min_el=min_el, rotctl="", gps_port=gps.path)
+p = subprocess.Popen(GUI, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+deadline, lat = time.time() + 30, None
+while time.time() < deadline and lat is None:
+    time.sleep(1)
+    with open(sm.CONFIG_PATH) as fh:
+        lat = json.load(fh).get("lat")
+shot("4_gps_at_startup")
+p.terminate()
+print(p.communicate(timeout=15)[0].decode(errors="replace")[-1500:])
+check(lat is not None and abs(lat - 51.4779) < 1e-4, "the program took a fix at startup and saved it")
+
+# the window: Settings fills itself in, and the startup fix moves the station
+write_cfg(min_el=min_el, gps_port=gps.path)
+root = tk.Tk(className="sunmoon")
+app = g.App(root)
+root.update()
+
+
+def wait_for(until, seconds):
+    end = time.time() + seconds
+    while time.time() < end and not until():
+        root.update()
+        time.sleep(0.05)
+    return until()
+
+
+check(wait_for(lambda: app.gps is None, 15) and abs(app.station.lat - 51.4779) < 1e-4,
+      f"window moved to the fix: {app.station.label}")
+check(any("location updated" in ln[2] for ln in app.log), "and said so")
+check(not any("5128" in ln[2] or "51.47" in ln[2] for ln in app.log), "without putting the position in the log")
+d = g.Settings(app)
+root.update()
+for key in ("grid", "lat", "lon"):
+    d.v[key].set("")
+d.v["gps_port"].set(gps.path)
+d.get_position()
+check(wait_for(lambda: d.job is None, 15) and d.v["grid"].get() == "IO91XL" and d.v["lat"].get().startswith("51.477"),
+      f"Settings filled in: {d.v['grid'].get()} {d.v['lat'].get()} {d.v['lon'].get()}")
+shot("5_gps_settings")
+d.destroy()
+app.close()
+gps.close()
 
 print()
 print(f"{len(failures)} failed" if failures else "all passed")
